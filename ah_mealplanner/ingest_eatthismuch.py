@@ -1,3 +1,5 @@
+"""Ingest EatThisMuch foods and recipes."""
+
 import json
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
@@ -77,7 +79,7 @@ def _recipe_from_obj(obj: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
     image_url = urljoin(ETM_BASE + "/", img.get("image", "")) if img.get("image") else None
     public_url = obj.get("public_url") or obj.get("canonical_url")
     url = urljoin(ETM_BASE + "/", public_url.lstrip("/")) if public_url else None
-    directions = "\n".join(d.get("text", "").strip() for d in obj.get("directions", []) if d.get("text"))
+    directions = "n".join(d.get("text", "").strip() for d in obj.get("directions", []) if d.get("text"))
     recipe_row = {
         "source": "eatthismuch",
         "source_id": str(obj.get("id")),
@@ -142,4 +144,3 @@ def crawl_etm_recipes(
                 break
         next_path = data.get("meta", {}).get("next")
     return count
-
