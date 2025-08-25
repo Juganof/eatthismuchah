@@ -1,3 +1,5 @@
+"""Ingest EatThisMuch foods and recipes."""
+
 import json
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
