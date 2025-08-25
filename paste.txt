@@ -1,0 +1,15 @@
+PS C:\Users\vande\Downloads\eatthismuchah>  python -m ah_mealplanner.web
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\vande\Downloads\eatthismuchah\ah_mealplanner\web\__main__.py", line 10, in <module>       
+    main()
+  File "C:\Users\vande\Downloads\eatthismuchah\ah_mealplanner\web\__main__.py", line 5, in main
+    app = create_app()
+          ^^^^^^^^^^^^
+  File "C:\Users\vande\Downloads\eatthismuchah\ah_mealplanner\web\__init__.py", line 10, in create_app     
+    from .routes import bp as core_bp
+  File "C:\Users\vande\Downloads\eatthismuchah\ah_mealplanner\web\routes.py", line 132
+    tag_facets = conn.execute(
+                             ^
+SyntaxError: '(' was never closed

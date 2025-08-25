@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AH Meal Planner</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; color: #222; }
+      header { margin-bottom: 1.5rem; }
+      nav a { margin-right: 1rem; text-decoration: none; color: #0366d6; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border-bottom: 1px solid #eee; padding: 0.5rem; text-align: left; }
+      input[type="text"], input[type="number"], input[type="date"] { padding: 0.4rem; width: 100%; max-width: 300px; }
+      .btn { display: inline-block; background: #0366d6; color: white; padding: 0.5rem 0.75rem; border-radius: 6px; text-decoration: none; border: 0; cursor: pointer; }
+      .muted { color: #666; }
+      form .row { margin-bottom: 0.75rem; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>AH Meal Planner</h1>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/recipes">Recipes</a>
+        <a href="/plan">Plan</a>
+        <a href="/plan-week">Weekly</a>
+        <a href="/settings">Settings</a>
+        <a href="/ingest">Ingest</a>
+        <a href="/admin">Admin</a>
+      </nav>
+    </header>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul>
+          {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </body>
+  </html>

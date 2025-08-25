@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Ingest Recipe</h2>
+<form method="post">
+  <div class="row">
+    <label>Recipe URL (Allerhande or JSON-LD)</label><br />
+    <input type="text" name="recipe_url" placeholder="https://www.ah.nl/allerhande/recept/..." />
+  </div>
+  <button class="btn" type="submit">Ingest</button>
+  </form>
+{% endblock %}
+

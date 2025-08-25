@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Admin: Crawls</h2>
+{% if message %}<p>{{ message }}</p>{% endif %}
+
+<div class="grid">
+  <div>
+    <h3>Stats</h3>
+    <ul>
+      <li>Recipes: <span id="stat-recipes">{{ stats.recipes }}</span></li>
+      <li>Seen OK (recipes): <span id="stat-seen-recipes">{{ stats.seen_ok_recipes }}</span></li>
+    </ul>
+  </div>
+  <div>
+    <h3>Active Jobs</h3>
+    <ul>
+      <li>Recipes: <span id="job-recipes-status">{% if state.recipes.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-recipes-processed">{{ state.recipes.processed }}</span>, errors <span id="job-recipes-errors">{{ state.recipes.errors }}</span></li>
+      <li>Nutrition: <span id="job-nutrition-status">{% if state.nutrition.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-nutrition-processed">{{ state.nutrition.processed }}</span>, errors <span id="job-nutrition-errors">{{ state.nutrition.errors }}</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3>Start Recipe Crawl</h3>
+<form method="post">
+  <input type="hidden" name="job" value="recipes" />
+  <div class="row">
+    <label>Limit</label><br />
+    <input type="number" name="limit" value="200" min="1" />
+  </div>
+  <div class="row">
+    <label>Sitemaps (one per line)</label><br />
+    <textarea name="sitemaps" rows="3" cols="80">https://www.ah.nl/sitemaps/entities/allerhande/recipes.xml</textarea>
+  </div>
+  <button class="btn" type="submit">Start Recipes Crawl</button>
+</form>
+
+<h3>Refresh Nutrition</h3>
+<form method="post">
+  <input type="hidden" name="job" value="nutrition" />
+  <div class="row">
+    <label>Limit</label><br />
+    <input type="number" name="limit" value="500" min="1" />
+  </div>
+  <div class="row">
+    <label><input type="checkbox" name="missing_only" checked /> Only update recipes with missing/zero values</label>
+  </div>
+  <button class="btn" type="submit">Start Nutrition Refresh</button>
+  <p class="muted">Fetches recipe pages and parses kcal/P/C/F per serving (no product scraping).</p>
+  </form>
+
+{# Product crawl removed: products are auto-scraped from recipe pages during crawl #}
+
+<h3>Recent Errors</h3>
+{% if errors %}
+  <table>
+    <thead><tr><th>When</th><th>URL</th><th>Error</th></tr></thead>
+    <tbody>
+      {% for e in errors %}
+        <tr>
+          <td class="muted">{{ e['last_seen'] }}</td>
+          <td><a href="{{ e['url'] }}" target="_blank" rel="noopener noreferrer">{{ e['url'] }}</a></td>
+          <td>{{ e['last_error'] }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="muted">No recent crawl errors.</p>
+{% endif %}
+
+<h3>Recently Saved</h3>
+<div class="grid">
+  <div>
+    <h4>Recipes</h4>
+    <ul id="recent-recipes"></ul>
+  </div>
+  
+</div>
+
+<h3>Live Events</h3>
+<div class="grid">
+  <div>
+    <h4>Recipe Crawl</h4>
+    <ul id="events-recipes" class="muted"></ul>
+  </div>
+  <div>
+    <h4>Nutrition Refresh</h4>
+    <ul id="events-nutrition" class="muted"></ul>
+  </div>
+</div>
+
+<script>
+async function refreshState(){
+  try {
+    const r = await fetch('/admin/state');
+    const s = await r.json();
+    // Jobs
+    const jr = s.recipes, jn = s.nutrition;
+    document.getElementById('job-recipes-status').textContent = jr.running ? 'running' : 'idle';
+    document.getElementById('job-recipes-processed').textContent = jr.processed;
+    document.getElementById('job-recipes-errors').textContent = jr.errors;
+    document.getElementById('job-nutrition-status').textContent = jn.running ? 'running' : 'idle';
+    document.getElementById('job-nutrition-processed').textContent = jn.processed;
+    document.getElementById('job-nutrition-errors').textContent = jn.errors;
+    // Events
+    function renderEvents(elId, events){
+      const el = document.getElementById(elId);
+      el.innerHTML = '';
+      for (const ev of events){
+        const li = document.createElement('li');
+        const when = new Date(ev.ts * 1000).toLocaleTimeString();
+        let text = `[${when}] ${ev.status}: ${ev.url || ''}`;
+        if (ev.error) text += ` — ${ev.error}`;
+        li.textContent = text;
+        el.appendChild(li);
+      }
+    }
+    renderEvents('events-recipes', jr.events || []);
+    renderEvents('events-nutrition', jn.events || []);
+  } catch (e) {
+    // ignore
+  }
+}
+setInterval(refreshState, 1500);
+refreshState();
+
+async function refreshRecent(){
+  try {
+    const r = await fetch('/admin/recent');
+    const s = await r.json();
+    function renderList(elId, rows){
+      const el = document.getElementById(elId);
+      el.innerHTML = '';
+      for (const row of rows){
+        const li = document.createElement('li');
+        li.textContent = `#${row.id} ${row.title}`;
+        el.appendChild(li);
+      }
+    }
+    renderList('recent-recipes', s.recipes || []);
+  } catch (e){ }
+}
+setInterval(refreshRecent, 2000);
+refreshRecent();
+</script>
+
+<hr />
+<h3 style="color:#b00020;">Danger Zone</h3>
+<form method="post" onsubmit="return confirm('This will permanently remove all recipes, products, ingredients, tags, meal plans, and crawl state. Are you sure?');">
+  <input type="hidden" name="job" value="wipe" />
+  <p class="muted">Type DELETE to confirm removal of ALL data (cannot be undone).</p>
+  <input type="text" name="confirm" placeholder="DELETE" style="padding:0.4rem;" />
+  <button class="btn" type="submit" style="background:#b00020;">Remove All Data</button>
+  <p class="muted">This clears recipes, products, ingredients, tags, meal plans, and crawl state.</p>
+  </form>
+{% endblock %}

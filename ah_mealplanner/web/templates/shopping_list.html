@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Shopping List</h2>
+<p>For {{ days }} day(s) starting {{ start }}.</p>
+
+<h3>Structured Ingredients</h3>
+{% if ingredients_structured %}
+<table>
+  <thead><tr><th>Ingredient</th><th>Quantity</th><th>Unit</th></tr></thead>
+  <tbody>
+    {% for name, unit, qty in ingredients_structured %}
+      <tr><td>{{ name }}</td><td>{{ qty|fmt }}</td><td>{{ unit }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="muted">No structured ingredient quantities available.</p>
+{% endif %}
+
+<h3>Other Ingredients</h3>
+{% if ingredients_free %}
+  <ul>
+    {% for raw, count in ingredients_free %}
+      <li>{{ raw }}{% if count>1 %} ×{{ count }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="muted">No unstructured ingredients.</p>
+{% endif %}
+
+<h3>Products (snacks/extras)</h3>
+{% if products %}
+<table>
+  <thead><tr><th>Product</th><th>Approx. grams</th></tr></thead>
+  <tbody>
+    {% for name, grams, url in products %}
+      <tr>
+        <td>
+          {% if url %}
+            <a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ name }}</a>
+          {% else %}
+            {{ name }}
+          {% endif %}
+        </td>
+        <td>{{ grams|fmt }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="muted">No products included.</p>
+{% endif %}
+
+<p><a class="btn" href="/plan-week">Back to Weekly Planner</a></p>
+{% endblock %}

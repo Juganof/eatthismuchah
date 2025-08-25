@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ r['title'] }}</h2>
+<p class="muted">
+  {% if src_url %}
+    <a href="{{ src_url }}" target="_blank" rel="noopener noreferrer">Source</a>
+  {% else %}
+    <span>No source URL available</span>
+  {% endif %}
+</p>
+<p>
+  {{ r['kcal_per_serving']|fmt }} kcal ·
+  P {{ r['protein_g_per_serving']|fmt }}g ·
+  C {{ r['carbs_g_per_serving']|fmt }}g ·
+  F {{ r['fat_g_per_serving']|fmt }}g
+  {% if r['servings'] %} · {{ r['servings'] }} servings{% endif %}
+  {% if r['total_time_min'] %} · {{ r['total_time_min'] }} min{% endif %}
+  </p>
+
+<h3>Ingredients</h3>
+<ul>
+  {% for ing in ings %}
+    <li>
+      {{ (ing['raw'] or ing['name']) }}
+      {% if ing['quantity'] %}
+        — {{ ing['quantity']|fmt }} {{ ing['unit'] or '' }}
+      {% endif %}
+      {% if ing['product_name'] %}
+        <span class="muted" style="color:#0a7d2b;">(→
+          {% if ing['product_url'] %}
+            <a href="{{ ing['product_url'] }}" target="_blank" rel="noopener noreferrer">{{ ing['product_name'] }}</a>
+          {% else %}
+            {{ ing['product_name'] }}
+          {% endif %}
+        )</span>
+      {% endif %}
+    </li>
+  {% endfor %}
+  {% if not ings %}
+    <li class="muted">No ingredients stored</li>
+  {% endif %}
+  </ul>
+
+{% if tags %}
+<h3>Tags</h3>
+<p class="muted">
+  {% for t in tags %}
+    <a href="/recipes?tag={{ t['tag'] }}" style="margin-right:6px;">#{{ t['tag'] }}</a>
+  {% endfor %}
+</p>
+{% endif %}
+
+<h3>Instructions</h3>
+<pre style="white-space: pre-wrap">{{ r['instructions'] }}</pre>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+  <div>
+    <h2>Stats</h2>
+    <p><strong>{{ n_rec }}</strong> recipes</p>
+    <p><strong>{{ n_prod }}</strong> products</p>
+  </div>
+  <div>
+    <h2>Recent Plans</h2>
+    {% if last_plans %}
+      <ul>
+        {% for p in last_plans %}
+          <li><a href="/plan/{{ p['date'] }}">{{ p['date'] }}</a> — {{ p['total_calories']|fmt }} kcal</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No plans saved yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+

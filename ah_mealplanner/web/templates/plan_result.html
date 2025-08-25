@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block head %}
+{{ super() }}
+{% endblock %}
+{% block content %}
+<h2>Plan for {{ plan['date'] }}</h2>
+<p>
+  {% set m = plan['macros_json'] %}
+  {% set target = m and (m.get('target') if m else None) %}
+  {% if target %}
+    <span class="muted">Goal:</span>
+    {{ (target.get('calories') or 0)|fmt }} kcal ·
+    {% if target.get('protein_g') is not none %}P {{ target.get('protein_g')|fmt }}g{% else %}P —{% endif %} ·
+    {% if target.get('carbs_g') is not none %}C {{ target.get('carbs_g')|fmt }}g{% else %}C —{% endif %} ·
+    {% if target.get('fat_g') is not none %}F {{ target.get('fat_g')|fmt }}g{% else %}F —{% endif %}
+    <br/>
+  {% endif %}
+  <span class="muted">Actual:</span>
+  {{ plan['total_calories']|fmt }} kcal · P {{ plan['total_protein']|fmt }}g · C {{ plan['total_carbs']|fmt }}g · F {{ plan['total_fat']|fmt }}g
+</p>
+
+{% set slots = (plan['macros_json'] and plan['macros_json'].get('slots')) or None %}
+{% if slots %}
+  {% set groups = [] %}
+  {% for i in range(slots|length) %}
+    {% set _ = groups.append([]) %}
+  {% endfor %}
+  {#
+    Items are stored in order per meal (meal_index). We distribute them round-robin into groups of slots length.
+  #}
+  {% for pair in items %}
+    {% set idx = loop.index0 %}
+    {% set slot_idx = idx % (slots|length) %}
+    {% set _ = groups[slot_idx].append(pair) %}
+  {% endfor %}
+  {% for si in range(slots|length) %}
+    <h3>{{ slots[si] }}</h3>
+    <ol>
+      {% for it, title in groups[si] %}
+      <li>
+        <strong>[{{ it['item_type'] }}]</strong>
+        {% if it['item_type'] == 'recipe' %}
+          <a href="{{ url_for('core.recipe_detail', rid=it['item_id']) }}">{{ title }}</a> —
+          {{ it['servings']|fmt }} servings
+          <a href="{{ url_for('core.alternatives', item_id=it['id'], plan_id=plan['id']) }}">(swap)</a>
+        {% else %}
+          {{ title }} — {{ it['servings']|fmt }} x100g
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  {% endfor %}
+{% else %}
+  <ol>
+    {% for it, title in items %}
+    <li>
+      <strong>[{{ it['item_type'] }}]</strong>
+        {% if it['item_type'] == 'recipe' %}
+          <a href="{{ url_for('core.recipe_detail', rid=it['item_id']) }}">{{ title }}</a> —
+          {{ it['servings']|fmt }} servings
+          <a href="{{ url_for('core.alternatives', item_id=it['id'], plan_id=plan['id']) }}">(swap)</a>
+        {% else %}
+          {{ title }} — {{ it['servings']|fmt }} x100g
+        {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+{% endif %}
+
+<p><a class="btn" href="/plan">New Plan</a></p>
+{% endblock %}
+

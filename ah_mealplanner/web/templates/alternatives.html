@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Alternatives for {{ recipe['title'] }}</h2>
+
+<h3>Original Recipe</h3>
+<p>{{ recipe['title'] }}</p>
+
+<h3>Alternatives</h3>
+{% if alternatives %}
+  <form method="post">
+    <ul>
+      {% for alt in alternatives %}
+        <li>
+          <input type="radio" name="recipe_id" value="{{ alt['id'] }}" id="alt_{{ alt['id'] }}">
+          <label for="alt_{{ alt['id'] }}">
+            <a href="{{ url_for('core.recipe_detail', rid=alt['id']) }}">{{ alt['title'] }}</a>
+          </label>
+        </li>
+      {% endfor %}
+    </ul>
+    <button type="submit">Select</button>
+  </form>
+{% else %}
+  <p>No alternatives found.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Recipes</h2>
+<form method="get">
+  <input type="text" name="q" placeholder="Search title" value="{{ q }}" />
+  <input type="text" name="tag" placeholder="Filter by tag (e.g., ontbijt)" value="{{ tag }}" />
+  <button class="btn" type="submit">Search</button>
+</form>
+{% if q or tag %}
+  <p class="muted">
+    {% if q %}Query: <strong>"{{ q }}"</strong>{% endif %}
+    {% if q and tag %} · {% endif %}
+    {% if tag %}Tag: <strong>#{{ tag }}</strong>{% endif %}
+    —
+    <a href="/recipes{% if q and not tag %}?q={{ q }}{% endif %}">clear{% if tag %} tag{% elif q %} query{% endif %}</a>
+  </p>
+{% endif %}
+{% if tag_facets %}
+  <h3>Tags</h3>
+  {% for group in tag_facets|groupby('tag_type') %}
+    <h4 class="muted" style="margin: .5rem 0 .25rem;">{{ group.grouper or 'other' }}</h4>
+    <p>
+      {% for t in group.list %}
+        {% set active = (t['tag'] == tag) %}
+        <a href="/recipes?{% if q %}q={{ q }}&{% endif %}tag={{ t['tag'] }}"
+           style="margin-right:10px; padding:2px 6px; border-radius:12px; text-decoration:none; {{ 'background:#e6f0ff; font-weight:600;' if active else 'background:#f5f5f5;' }}">
+           #{{ t['tag'] }} ({{ t['cnt'] }})
+        </a>
+      {% endfor %}
+    </p>
+  {% endfor %}
+{% endif %}
+<table>
+  <thead><tr><th>Title</th><th>kcal</th><th>Protein</th><th>Carbs</th><th>Fat</th></tr></thead>
+  <tbody>
+    {% for r in recipes %}
+    <tr>
+      <td><a href="/recipes/{{ r['id'] }}">{{ r['title'] }}</a></td>
+      <td>{{ r['kcal_per_serving']|fmt }}</td>
+      <td>{{ r['protein_g_per_serving']|fmt }}</td>
+      <td>{{ r['carbs_g_per_serving']|fmt }}</td>
+      <td>{{ r['fat_g_per_serving']|fmt }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

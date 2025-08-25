@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Create Weekly Plan</h2>
+<form method="post">
+  <div class="row">
+    <label>Start Date</label><br />
+    <input type="date" name="start" value="{{ today }}" />
+  </div>
+  <div class="row">
+    <label>Days</label><br />
+    <input type="number" name="days" value="7" min="1" max="14" />
+  </div>
+  <div class="row">
+    <label>Calories per day</label><br />
+    <input type="number" name="calories" value="2200" step="50" />
+  </div>
+  <div class="row">
+    <label>Meals per day</label><br />
+    <input type="number" name="meals" value="3" min="1" max="8" />
+  </div>
+  <div class="row">
+    <label>Meal slots (override count if selected)</label><br />
+    <label><input type="checkbox" name="slot_breakfast" checked /> Breakfast</label>
+    <label><input type="checkbox" name="slot_lunch" checked /> Lunch</label>
+    <label><input type="checkbox" name="slot_dinner" checked /> Dinner</label>
+    <label><input type="checkbox" name="slot_snack" /> Snack</label>
+  </div>
+  <div class="row">
+    <label>Exclude (comma-separated)</label><br />
+    <input type="text" name="exclude" placeholder="pinda, noten" />
+  </div>
+  <div class="row">
+    <label>Macro goals (per day, grams)</label><br />
+    <div class="grid" style="grid-template-columns: repeat(3, minmax(80px, 140px)); gap: 0.5rem; max-width: 460px;">
+      <div>
+        <label>Protein (g)</label>
+        <input type="number" name="protein_g" placeholder="e.g. 140" min="0" step="1" />
+      </div>
+      <div>
+        <label>Carbs (g)</label>
+        <input type="number" name="carbs_g" placeholder="e.g. 200" min="0" step="1" />
+      </div>
+      <div>
+        <label>Fat (g)</label>
+        <input type="number" name="fat_g" placeholder="e.g. 70" min="0" step="1" />
+      </div>
+    </div>
+  </div>
+  <button class="btn" type="submit">Generate & View Shopping List</button>
+  </form>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const caloriesInput = document.querySelector('input[name="calories"]');
+    const proteinInput = document.querySelector('input[name="protein_g"]');
+    const carbsInput = document.querySelector('input[name="carbs_g"]');
+    const fatInput = document.querySelector('input[name="fat_g"]');
+
+    const storedSettings = localStorage.getItem('macroDefaults');
+    const userDefaults = storedSettings ? JSON.parse(storedSettings) : { p: 30, c: 40, f: 30 };
+    // Convert percentages to fractions for calculation
+    const macroDefaults = { 
+      p: userDefaults.p / 100, 
+      c: userDefaults.c / 100, 
+      f: userDefaults.f / 100 
+    };
+    let isUpdating = false;
+
+    function updateMacrosFromCalories() {
+        if (isUpdating) return;
+        isUpdating = true;
+
+        const totalCalories = parseFloat(caloriesInput.value) || 0;
+        if (totalCalories > 0) {
+            proteinInput.value = Math.round((totalCalories * macroDefaults.p) / 4);
+            carbsInput.value = Math.round((totalCalories * macroDefaults.c) / 4);
+            fatInput.value = Math.round((totalCalories * macroDefaults.f) / 9);
+        }
+        isUpdating = false;
+    }
+
+    function updateFromMacros(changedInput) {
+        if (isUpdating) return;
+        isUpdating = true;
+
+        const totalCalories = parseFloat(caloriesInput.value) || 0;
+        const protein = parseFloat(proteinInput.value) || 0;
+        const carbs = parseFloat(carbsInput.value) || 0;
+        const fat = parseFloat(fatInput.value) || 0;
+
+        if (totalCalories > 0) {
+            if (changedInput === proteinInput) {
+                const proteinCalories = protein * 4;
+                const remainingCalories = totalCalories - proteinCalories;
+                const remainingRatio = macroDefaults.c + macroDefaults.f;
+                if (remainingRatio > 0) {
+                    carbsInput.value = Math.round((remainingCalories * (macroDefaults.c / remainingRatio)) / 4);
+                    fatInput.value = Math.round((remainingCalories * (macroDefaults.f / remainingRatio)) / 9);
+                }
+            } else if (changedInput === carbsInput) {
+                const carbCalories = carbs * 4;
+                const remainingCalories = totalCalories - carbCalories;
+                const remainingRatio = macroDefaults.p + macroDefaults.f;
+                if (remainingRatio > 0) {
+                    proteinInput.value = Math.round((remainingCalories * (macroDefaults.p / remainingRatio)) / 4);
+                    fatInput.value = Math.round((remainingCalories * (macroDefaults.f / remainingRatio)) / 9);
+                }
+            } else if (changedInput === fatInput) {
+                const fatCalories = fat * 9;
+                const remainingCalories = totalCalories - fatCalories;
+                const remainingRatio = macroDefaults.p + macroDefaults.c;
+                if (remainingRatio > 0) {
+                    proteinInput.value = Math.round((remainingCalories * (macroDefaults.p / remainingRatio)) / 4);
+                    carbsInput.value = Math.round((remainingCalories * (macroDefaults.c / remainingRatio)) / 4);
+                }
+            }
+        }
+        isUpdating = false;
+    }
+
+    caloriesInput.addEventListener('input', updateMacrosFromCalories);
+    proteinInput.addEventListener('input', () => updateFromMacros(proteinInput));
+    carbsInput.addEventListener('input', () => updateFromMacros(carbsInput));
+    fatInput.addEventListener('input', () => updateFromMacros(fatInput));
+
+    // Initial population
+    updateMacrosFromCalories();
+});
+</script>
+{% endblock %}
+
