@@ -11,7 +11,7 @@
     <ul>
       {% for alt in alternatives %}
         <li>
-          <input type="radio" name="recipe_id" value="{{ alt['id'] }}" id="alt_{{ alt['id'] }}">
+          <input type="radio" name="recipe_id" value="{{ alt['id'] }}" id="alt_{{ alt['id'] }}" required>
           <label for="alt_{{ alt['id'] }}">
             <a href="{{ url_for('core.recipe_detail', rid=alt['id']) }}">{{ alt['title'] }}</a>
           </label>

@@ -733,6 +733,12 @@ def admin_recent():
 def alternatives(item_id: int, plan_id: int):
     if request.method == "POST":
         new_recipe_id = request.form.get("recipe_id")
+        if not new_recipe_id:
+            return ("No recipe selected", 400)
+        try:
+            new_recipe_id = int(new_recipe_id)
+        except ValueError:
+            return ("Invalid recipe id", 400)
         with _conn() as conn:
             conn.execute("update meal_plan_items set item_id = ? where id = ?", (new_recipe_id, item_id))
             _recalculate_plan_totals(conn, plan_id)
