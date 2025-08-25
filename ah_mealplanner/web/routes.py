@@ -10,6 +10,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash
 from .. import db
 from ..meal_planner import generate_daily_plan, generate_weekly_plan
 from ..ingest_allerhande import fetch_recipe, crawl_allerhande, enrich_recipe, refresh_nutrition
+from ..ingest_eatthismuch import crawl_etm_foods, crawl_etm_recipes
 # Product crawl and verification disabled
 
 
@@ -555,15 +556,19 @@ def shopping_list():
 _crawl_state = {
     "recipes": {"running": False, "processed": 0, "errors": 0, "started_at": None, "finished_at": None, "last": None},
     "nutrition": {"running": False, "processed": 0, "errors": 0, "started_at": None, "finished_at": None, "last": None},
+    "etm_foods": {"running": False, "processed": 0, "errors": 0, "started_at": None, "finished_at": None, "last": None},
+    "etm_recipes": {"running": False, "processed": 0, "errors": 0, "started_at": None, "finished_at": None, "last": None},
 }
 _crawl_logs = {
     "recipes": deque(maxlen=200),
     "nutrition": deque(maxlen=200),
+    "etm_foods": deque(maxlen=200),
+    "etm_recipes": deque(maxlen=200),
 }
 _crawl_lock = threading.Lock()
 
 
-def _start_crawl(job: str, seeds: list[str], limit: int):
+def _start_crawl(job: str, seeds: list[str], limit: int, delay: float | None = None):
     state = _crawl_state[job]
     with _crawl_lock:
         if state["running"]:
@@ -607,6 +612,10 @@ def _start_crawl(job: str, seeds: list[str], limit: int):
                                 st_n["last"] = ev.get("error")
                             _crawl_logs["nutrition"].appendleft(ev)
                     refresh_nutrition(conn, limit=limit, missing_only=missing_only, delay_s=0.5, progress=nprogress)
+                elif job == "etm_foods":
+                    crawl_etm_foods(conn, limit=limit, delay_s=delay or 0.2, progress=progress)
+                elif job == "etm_recipes":
+                    crawl_etm_recipes(conn, limit=limit, delay_s=delay or 0.2, progress=progress)
                 else:
                     # Product crawl disabled
                     pass
@@ -626,6 +635,7 @@ def admin():
     if request.method == "POST":
         job = request.form.get("job")
         limit = int(request.form.get("limit", 100))
+        delay = float(request.form.get("delay", 0.2))
         sitemaps = request.form.get("sitemaps", "").strip()
         seeds = [s.strip() for s in sitemaps.replace("\r", "\n").split("\n") if s.strip()]
         if job == "wipe":
@@ -674,6 +684,10 @@ def admin():
             # Use seeds param as a carrier for flags (to reuse _start_crawl signature)
             started = _start_crawl("nutrition", [f"missing_only={missing_only}"], limit)
             message = f"Started nutrition refresh (missing_only={missing_only}) with limit {limit}" if started else "Nutrition refresh already running"
+        elif job in ("etm_foods", "etm_recipes"):
+            started = _start_crawl(job, [], limit, delay)
+            name = "ETM foods" if job == "etm_foods" else "ETM recipes"
+            message = f"Started {name} crawl with limit {limit}" if started else f"{name} crawl already running"
         else:
             if not seeds:
                 if job == "recipes":
@@ -704,6 +718,8 @@ def admin_state():
     return {
         "recipes": _ser_state("recipes"),
         "nutrition": _ser_state("nutrition"),
+        "etm_foods": _ser_state("etm_foods"),
+        "etm_recipes": _ser_state("etm_recipes"),
     }
 
 

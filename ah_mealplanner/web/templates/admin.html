@@ -16,6 +16,8 @@
     <ul>
       <li>Recipes: <span id="job-recipes-status">{% if state.recipes.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-recipes-processed">{{ state.recipes.processed }}</span>, errors <span id="job-recipes-errors">{{ state.recipes.errors }}</span></li>
       <li>Nutrition: <span id="job-nutrition-status">{% if state.nutrition.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-nutrition-processed">{{ state.nutrition.processed }}</span>, errors <span id="job-nutrition-errors">{{ state.nutrition.errors }}</span></li>
+      <li>ETM Foods: <span id="job-etm-foods-status">{% if state.etm_foods.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-etm-foods-processed">{{ state.etm_foods.processed }}</span>, errors <span id="job-etm-foods-errors">{{ state.etm_foods.errors }}</span></li>
+      <li>ETM Recipes: <span id="job-etm-recipes-status">{% if state.etm_recipes.running %}running{% else %}idle{% endif %}</span> — processed <span id="job-etm-recipes-processed">{{ state.etm_recipes.processed }}</span>, errors <span id="job-etm-recipes-errors">{{ state.etm_recipes.errors }}</span></li>
     </ul>
   </div>
 </div>
@@ -47,6 +49,33 @@
   <button class="btn" type="submit">Start Nutrition Refresh</button>
   <p class="muted">Fetches recipe pages and parses kcal/P/C/F per serving (no product scraping).</p>
   </form>
+
+<h3>Scrape EatThisMuch</h3>
+<form method="post">
+  <input type="hidden" name="job" value="etm_foods" />
+  <div class="row">
+    <label>Limit</label><br />
+    <input type="number" name="limit" value="100" min="1" />
+  </div>
+  <div class="row">
+    <label>Delay (seconds)</label><br />
+    <input type="number" name="delay" value="0.2" step="0.1" min="0" />
+  </div>
+  <button class="btn" type="submit">Crawl ETM Foods</button>
+</form>
+
+<form method="post" style="margin-top:1rem;">
+  <input type="hidden" name="job" value="etm_recipes" />
+  <div class="row">
+    <label>Limit</label><br />
+    <input type="number" name="limit" value="100" min="1" />
+  </div>
+  <div class="row">
+    <label>Delay (seconds)</label><br />
+    <input type="number" name="delay" value="0.2" step="0.1" min="0" />
+  </div>
+  <button class="btn" type="submit">Crawl ETM Recipes</button>
+</form>
 
 {# Product crawl removed: products are auto-scraped from recipe pages during crawl #}
 
@@ -87,6 +116,14 @@
     <h4>Nutrition Refresh</h4>
     <ul id="events-nutrition" class="muted"></ul>
   </div>
+  <div>
+    <h4>ETM Foods</h4>
+    <ul id="events-etm-foods" class="muted"></ul>
+  </div>
+  <div>
+    <h4>ETM Recipes</h4>
+    <ul id="events-etm-recipes" class="muted"></ul>
+  </div>
 </div>
 
 <script>
@@ -95,13 +132,19 @@ async function refreshState(){
     const r = await fetch('/admin/state');
     const s = await r.json();
     // Jobs
-    const jr = s.recipes, jn = s.nutrition;
+    const jr = s.recipes, jn = s.nutrition, jf = s.etm_foods, je = s.etm_recipes;
     document.getElementById('job-recipes-status').textContent = jr.running ? 'running' : 'idle';
     document.getElementById('job-recipes-processed').textContent = jr.processed;
     document.getElementById('job-recipes-errors').textContent = jr.errors;
     document.getElementById('job-nutrition-status').textContent = jn.running ? 'running' : 'idle';
     document.getElementById('job-nutrition-processed').textContent = jn.processed;
     document.getElementById('job-nutrition-errors').textContent = jn.errors;
+    document.getElementById('job-etm-foods-status').textContent = jf.running ? 'running' : 'idle';
+    document.getElementById('job-etm-foods-processed').textContent = jf.processed;
+    document.getElementById('job-etm-foods-errors').textContent = jf.errors;
+    document.getElementById('job-etm-recipes-status').textContent = je.running ? 'running' : 'idle';
+    document.getElementById('job-etm-recipes-processed').textContent = je.processed;
+    document.getElementById('job-etm-recipes-errors').textContent = je.errors;
     // Events
     function renderEvents(elId, events){
       const el = document.getElementById(elId);
@@ -117,6 +160,8 @@ async function refreshState(){
     }
     renderEvents('events-recipes', jr.events || []);
     renderEvents('events-nutrition', jn.events || []);
+    renderEvents('events-etm-foods', jf.events || []);
+    renderEvents('events-etm-recipes', je.events || []);
   } catch (e) {
     // ignore
   }
