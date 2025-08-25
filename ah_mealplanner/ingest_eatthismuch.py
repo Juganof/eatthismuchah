@@ -110,10 +110,14 @@ def _recipe_from_obj(obj: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
             }
         )
     tags: List[Dict] = []
-    tag_cloud = obj.get("tag_cloud") or []
+    tag_cloud = obj.get("tag_cloud")
+    tag_items: List[str] = []
     if isinstance(tag_cloud, list):
-        for t in tag_cloud:
-            tags.append({"tag": t, "type": None})
+        tag_items = tag_cloud
+    elif isinstance(tag_cloud, str):
+        tag_items = [t.strip().strip('"') for t in tag_cloud.split() if t.strip()]
+    for t in tag_items:
+        tags.append({"tag": t, "type": None})
     return recipe_row, ingredients, tags
 
 
