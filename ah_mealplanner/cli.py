@@ -9,7 +9,7 @@ from .ingest_allerhande import fetch_recipe, crawl_allerhande, enrich_recipe
 from .ingest_ah import import_products_from_csv, import_products_from_json, crawl_ah_products
 from .http import fetch
 from .ingest_allerhande import _extract_json_ld, _first_recipe, _extract_nutrition_from_jsonld, _extract_nutrition_from_html
-from .meal_planner import generate_daily_plan
+from .meal_planner import generate_daily_plan, generate_weekly_plan
 # product verification removed
 
 
@@ -78,6 +78,43 @@ def cmd_plan_day(args):
         print(f"  {i}. [{it.item_type}] {it.title} - {it.servings:.2f} {unit} - {it.calories:.0f} kcal")
 
 
+def cmd_plan_week(args):
+    calories = float(args.calories)
+    meals = int(args.meals)
+    start = args.start
+    if start == "today":
+        start = date.today().isoformat()
+    days = int(args.days)
+    macro_targets = {
+        "protein_g": args.protein,
+        "carbs_g": args.carbs,
+        "fat_g": args.fat,
+    }
+    if all(v is None for v in macro_targets.values()):
+        macro_targets = None
+    exclusions: List[str] = []
+    if getattr(args, "exclude", None):
+        exclusions = [x.strip() for x in args.exclude.split(",") if x.strip()]
+    preferred = None
+    if getattr(args, "bias_tags", False):
+        preferred = default_meal_tags(meals)
+    with db.connect() as conn:
+        db.init_db(conn)
+        plans = generate_weekly_plan(
+            conn,
+            start,
+            days=days,
+            target_calories=calories,
+            meals_per_day=meals,
+            macro_targets=macro_targets,
+            exclusions=exclusions,
+            preferred_tags_per_meal=preferred,
+        )
+    for day, plan_id, totals in plans:
+        print(f"Saved plan #{plan_id} for {day}")
+        print("Totals:", totals)
+
+
 def cmd_crawl_allerhande(args):
     # Known likely sitemap entries; you can override with --sitemap
     seeds = args.sitemap or [
@@ -124,6 +161,18 @@ def build_parser():
     s.add_argument("--date", default="today", help="ISO date or 'today'")
     s.add_argument("--bias-tags", action="store_true", help="bias meal selection by typical tags (ontbijt/lunch/diner)")
     s.set_defaults(func=cmd_plan_day)
+
+    s = sub.add_parser("plan-week", help="generate and save meal plans for multiple days")
+    s.add_argument("--start", default="today", help="ISO start date or 'today'")
+    s.add_argument("--days", type=int, default=7, help="number of days to plan (default: 7)")
+    s.add_argument("--calories", required=True, help="target calories per day")
+    s.add_argument("--protein", type=float, help="target grams of protein per day")
+    s.add_argument("--carbs", type=float, help="target grams of carbs per day")
+    s.add_argument("--fat", type=float, help="target grams of fat per day")
+    s.add_argument("--meals", default=3, help="meals per day (default: 3)")
+    s.add_argument("--exclude", default="", help="comma-separated exclusions (e.g., noten,pinda)")
+    s.add_argument("--bias-tags", action="store_true", help="bias meal selection by typical tags (ontbijt/lunch/diner)")
+    s.set_defaults(func=cmd_plan_week)
 
     s = sub.add_parser("crawl-allerhande", help="crawl and ingest many Allerhande recipes via sitemaps")
     s.add_argument("--limit", type=int, default=200, help="max recipes to ingest")
