@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from .http import fetch
