@@ -7,6 +7,7 @@ from typing import List
 from . import db
 from .ingest_allerhande import fetch_recipe, crawl_allerhande, enrich_recipe
 from .ingest_ah import import_products_from_csv, import_products_from_json, crawl_ah_products
+from .ingest_eatthismuch import crawl_etm_foods, crawl_etm_recipes
 from .http import fetch
 from .ingest_allerhande import _extract_json_ld, _first_recipe, _extract_nutrition_from_jsonld, _extract_nutrition_from_html
 from .meal_planner import generate_daily_plan, generate_weekly_plan
@@ -137,6 +138,20 @@ def cmd_crawl_ah_products(args):
     print(f"Ingested {ingested} AH products from sitemaps")
 
 
+def cmd_crawl_etm_foods(args):
+    with db.connect() as conn:
+        db.init_db(conn)
+        ingested = crawl_etm_foods(conn, limit=args.limit, delay_s=args.delay)
+    print(f"Ingested {ingested} EatThisMuch foods")
+
+
+def cmd_crawl_etm_recipes(args):
+    with db.connect() as conn:
+        db.init_db(conn)
+        ingested = crawl_etm_recipes(conn, limit=args.limit, delay_s=args.delay)
+    print(f"Ingested {ingested} EatThisMuch recipes")
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="AH Personal Meal Planner")
     sub = p.add_subparsers(dest="cmd")
@@ -183,6 +198,16 @@ def build_parser():
     s.add_argument("--limit", type=int, default=200, help="max products to ingest")
     s.add_argument("--sitemap", action="append", help="seed sitemap URL(s)")
     s.set_defaults(func=cmd_crawl_ah_products)
+
+    s = sub.add_parser("crawl-etm-foods", help="ingest foods from the EatThisMuch API")
+    s.add_argument("--limit", type=int, default=100, help="max foods to ingest")
+    s.add_argument("--delay", type=float, default=0.2, help="delay between API calls in seconds")
+    s.set_defaults(func=cmd_crawl_etm_foods)
+
+    s = sub.add_parser("crawl-etm-recipes", help="ingest recipes from the EatThisMuch API")
+    s.add_argument("--limit", type=int, default=100, help="max recipes to ingest")
+    s.add_argument("--delay", type=float, default=0.2, help="delay between API calls in seconds")
+    s.set_defaults(func=cmd_crawl_etm_recipes)
 
     s = sub.add_parser("refresh-nutrition", help="refresh nutrition fields for recipes (parse from recipe pages)")
     s.add_argument("--limit", type=int, default=2000, help="max recipes to update")
