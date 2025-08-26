@@ -60,27 +60,28 @@ def generate_daily_plan(
     slot_names: Optional[List[str]] = None,
 ):
     exclusions = exclusions or []
-    # Derive default macro targets if not provided or fill in missing ones
-    if not macro_targets or all(v is None for v in macro_targets.values()):
-        try:
-            p_ratio, f_ratio, c_ratio = macro_split
+
+    # Derive default macro targets if not provided, or fill in any missing ones
+    try:
+        p_ratio, f_ratio, c_ratio = macro_split
+        defaults = {
+            "protein_g": target_calories * p_ratio / 4.0,
+            "fat_g": target_calories * f_ratio / 9.0,
+            "carbs_g": target_calories * c_ratio / 4.0,
+        }
+
+        if not macro_targets or all(v is None for v in macro_targets.values()):
+            macro_targets = defaults
+        else:
             macro_targets = {
-                "protein_g": target_calories * p_ratio / 4.0,
-                "fat_g": target_calories * f_ratio / 9.0,
-                "carbs_g": target_calories * c_ratio / 4.0,
+                "protein_g": macro_targets.get("protein_g") if macro_targets.get("protein_g") is not None else defaults["protein_g"],
+                "fat_g": macro_targets.get("fat_g") if macro_targets.get("fat_g") is not None else defaults["fat_g"],
+                "carbs_g": macro_targets.get("carbs_g") if macro_targets.get("carbs_g") is not None else defaults["carbs_g"],
             }
-        except Exception:
-            macro_targets = None
-    else:
-        try:
-            p_ratio, f_ratio, c_ratio = macro_split
-            macro_targets = {
-                "protein_g": macro_targets.get("protein_g") if macro_targets.get("protein_g") is not None else target_calories * p_ratio / 4.0,
-                "fat_g": macro_targets.get("fat_g") if macro_targets.get("fat_g") is not None else target_calories * f_ratio / 9.0,
-                "carbs_g": macro_targets.get("carbs_g") if macro_targets.get("carbs_g") is not None else target_calories * c_ratio / 4.0,
-            }
-        except Exception:
-            pass
+    except Exception:
+        # If anything goes wrong computing targets, fall back to None (calories-only planning)
+        macro_targets = None
+
     cur = conn.cursor()
     recipes = cur.execute("SELECT * FROM recipes").fetchall()
     products = cur.execute("SELECT * FROM products").fetchall()
