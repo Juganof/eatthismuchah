@@ -90,45 +90,49 @@ def generate_daily_plan(
     recipes = [r for r in recipes if not _filter_by_exclusions(r["title"] or "", exclusions)]
     products = [p for p in products if not _filter_by_exclusions(p["name"] or "", exclusions)]
 
-    # Basic selection: pick meals_per_day recipes closest to per-meal target calories
-    per_meal_target = target_calories / max(1, meals_per_day)
-    per_meal_macro_targets: Optional[Dict[str, float]] = None
-    if macro_targets:
-        try:
-            per_meal_macro_targets = {
-                "protein_g": float(macro_targets.get("protein_g")) / max(1, meals_per_day) if macro_targets.get("protein_g") is not None else None,
-                "carbs_g": float(macro_targets.get("carbs_g")) / max(1, meals_per_day) if macro_targets.get("carbs_g") is not None else None,
-                "fat_g": float(macro_targets.get("fat_g")) / max(1, meals_per_day) if macro_targets.get("fat_g") is not None else None,
-            }
-        except Exception:
-            per_meal_macro_targets = None
-
-    def score_recipe(r):
-        kcal = r["kcal_per_serving"] or 0.0
-        # Start with calorie deviation
-        score = abs(per_meal_target - kcal) if kcal else float("inf")
-        # If macro targets provided, add deviations for P/C/F where available
-        if per_meal_macro_targets:
-            try:
-                p_t = per_meal_macro_targets.get("protein_g")
-                c_t = per_meal_macro_targets.get("carbs_g")
-                f_t = per_meal_macro_targets.get("fat_g")
-                if p_t is not None:
-                    p = r["protein_g_per_serving"] or 0.0
-                    score += abs(p_t - p) * 2.0  # prioritize protein slightly
-                if c_t is not None:
-                    c = r["carbs_g_per_serving"] or 0.0
-                    score += abs(c_t - c) * 1.0
-                if f_t is not None:
-                    f = r["fat_g_per_serving"] or 0.0
-                    score += abs(f_t - f) * 1.2
-            except Exception:
-                pass
-        return score
-
-    chosen = []
+    # Basic selection: pick meals_per_day recipes while dynamically adjusting remaining macro targets
+    remaining_calories = float(target_calories)
+    remaining_macros = macro_targets.copy() if macro_targets else None
+    chosen: List[sqlite3.Row] = []
     used_ids = set()
     for meal_idx in range(meals_per_day):
+        remaining_meals = meals_per_day - meal_idx
+
+        per_meal_target = remaining_calories / max(1, remaining_meals)
+        per_meal_macro_targets: Optional[Dict[str, float]] = None
+        if remaining_macros:
+            try:
+                per_meal_macro_targets = {
+                    "protein_g": (remaining_macros.get("protein_g") or 0.0) / remaining_meals if remaining_macros.get("protein_g") is not None else None,
+                    "carbs_g": (remaining_macros.get("carbs_g") or 0.0) / remaining_meals if remaining_macros.get("carbs_g") is not None else None,
+                    "fat_g": (remaining_macros.get("fat_g") or 0.0) / remaining_meals if remaining_macros.get("fat_g") is not None else None,
+                }
+            except Exception:
+                per_meal_macro_targets = None
+
+        def score_recipe(r):
+            kcal = r["kcal_per_serving"] or 0.0
+            # Start with calorie deviation
+            score = abs(per_meal_target - kcal) if kcal else float("inf")
+            # If macro targets provided, add deviations for P/C/F where available
+            if per_meal_macro_targets:
+                try:
+                    p_t = per_meal_macro_targets.get("protein_g")
+                    c_t = per_meal_macro_targets.get("carbs_g")
+                    f_t = per_meal_macro_targets.get("fat_g")
+                    if p_t is not None:
+                        p = r["protein_g_per_serving"] or 0.0
+                        score += abs(p_t - p) * 2.0  # prioritize protein slightly
+                    if c_t is not None:
+                        c = r["carbs_g_per_serving"] or 0.0
+                        score += abs(c_t - c) * 1.0
+                    if f_t is not None:
+                        f = r["fat_g_per_serving"] or 0.0
+                        score += abs(f_t - f) * 1.2
+                except Exception:
+                    pass
+            return score
+
         candidates = recipes
         # If preferred tags provided for this meal, try to select from tagged recipes first
         if preferred_tags_per_meal and meal_idx < len(preferred_tags_per_meal):
@@ -157,6 +161,15 @@ def generate_daily_plan(
             picked = candidates_sorted[0]
             chosen.append(picked)
             used_ids.add(picked["id"])
+            kcal, p, c, f = _calc_recipe_macros(picked, 1.0)
+            remaining_calories = max(0.0, remaining_calories - kcal)
+            if remaining_macros:
+                if remaining_macros.get("protein_g") is not None:
+                    remaining_macros["protein_g"] = max(0.0, remaining_macros.get("protein_g", 0.0) - p)
+                if remaining_macros.get("carbs_g") is not None:
+                    remaining_macros["carbs_g"] = max(0.0, remaining_macros.get("carbs_g", 0.0) - c)
+                if remaining_macros.get("fat_g") is not None:
+                    remaining_macros["fat_g"] = max(0.0, remaining_macros.get("fat_g", 0.0) - f)
 
     items: List[PlanItem] = []
     for r in chosen:
