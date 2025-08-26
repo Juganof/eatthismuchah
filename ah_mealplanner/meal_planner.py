@@ -60,6 +60,27 @@ def generate_daily_plan(
     slot_names: Optional[List[str]] = None,
 ):
     exclusions = exclusions or []
+    # Derive default macro targets if not provided or fill in missing ones
+    if not macro_targets or all(v is None for v in macro_targets.values()):
+        try:
+            p_ratio, f_ratio, c_ratio = macro_split
+            macro_targets = {
+                "protein_g": target_calories * p_ratio / 4.0,
+                "fat_g": target_calories * f_ratio / 9.0,
+                "carbs_g": target_calories * c_ratio / 4.0,
+            }
+        except Exception:
+            macro_targets = None
+    else:
+        try:
+            p_ratio, f_ratio, c_ratio = macro_split
+            macro_targets = {
+                "protein_g": macro_targets.get("protein_g") if macro_targets.get("protein_g") is not None else target_calories * p_ratio / 4.0,
+                "fat_g": macro_targets.get("fat_g") if macro_targets.get("fat_g") is not None else target_calories * f_ratio / 9.0,
+                "carbs_g": macro_targets.get("carbs_g") if macro_targets.get("carbs_g") is not None else target_calories * c_ratio / 4.0,
+            }
+        except Exception:
+            pass
     cur = conn.cursor()
     recipes = cur.execute("SELECT * FROM recipes").fetchall()
     products = cur.execute("SELECT * FROM products").fetchall()
@@ -142,10 +163,9 @@ def generate_daily_plan(
         items.append(PlanItem("recipe", r["id"], 1.0, kcal, p, c, f, r["title"]))
 
     totals = _totals(items)
-    # Adjust with a product snack to reduce gaps
-    gap_cal = target_calories - totals["calories"]
+    # Adjust with up to two product snacks to reduce gaps
     if products:
-        # If we have macro targets, try to pick a product that reduces macro error
+        # If we have macro targets, try to pick products that reduce macro error
         def macro_error(totals_now: Dict[str, float]) -> float:
             if not macro_targets:
                 return 0.0
@@ -160,32 +180,50 @@ def generate_daily_plan(
             err += 0.5 * abs(target_calories - totals_now.get("calories", 0.0))
             return err
 
-        added = False
-        best_choice = None
-        best_err = None
-        for p_row in products:
-            kcal100 = p_row["kcal_per_100"] or 0.0
-            if kcal100 <= 0:
-                continue
-            # Heuristic grams: try to close calorie gap if positive, else a modest 100g
-            grams = 100.0
-            if gap_cal > target_calories * 0.05:
-                grams = min(200.0, max(50.0, (gap_cal / kcal100) * 100.0))
-            kcal, p, c, f = _calc_product_macros(p_row, grams)
-            test_totals = {
-                "calories": totals["calories"] + kcal,
-                "protein_g": totals["protein_g"] + p,
-                "carbs_g": totals["carbs_g"] + c,
-                "fat_g": totals["fat_g"] + f,
-            }
-            err = macro_error(test_totals) if macro_targets else abs((target_calories) - test_totals["calories"])  # fallback: calories only
-            if best_err is None or err < best_err:
-                best_err = err
-                best_choice = (p_row, grams, kcal, p, c, f)
-        if best_choice and (gap_cal > target_calories * 0.1 or macro_targets):
-            p_row, grams, kcal, p, c, f = best_choice
-            items.append(PlanItem("product", p_row["id"], grams / 100.0, kcal, p, c, f, p_row["name"]))
-            totals = _totals(items)
+        for _ in range(2):
+            gap_cal = target_calories - totals["calories"]
+            current_err = macro_error(totals) if macro_targets else abs(target_calories - totals["calories"])
+            best_choice = None
+            best_err = current_err
+            for p_row in products:
+                kcal100 = p_row["kcal_per_100"] or 0.0
+                if kcal100 <= 0:
+                    continue
+                # Heuristic grams: try to close macro deficits or calorie gap
+                grams = 100.0
+                if macro_targets:
+                    grams = 0.0
+                    for key, col in (("protein_g", "protein_g_per_100"), ("carbs_g", "carbs_g_per_100"), ("fat_g", "fat_g_per_100")):
+                        tgt = macro_targets.get(key)
+                        if tgt is None:
+                            continue
+                        deficit = tgt - totals.get(key, 0.0)
+                        per100 = p_row[col] or 0.0
+                        if deficit > 0 and per100 > 0:
+                            grams = max(grams, deficit / per100 * 100.0)
+                    if grams <= 0:
+                        grams = 50.0
+                    grams = min(300.0, max(25.0, grams))
+                else:
+                    if gap_cal > target_calories * 0.05:
+                        grams = min(200.0, max(50.0, (gap_cal / kcal100) * 100.0))
+                kcal, p, c, f = _calc_product_macros(p_row, grams)
+                test_totals = {
+                    "calories": totals["calories"] + kcal,
+                    "protein_g": totals["protein_g"] + p,
+                    "carbs_g": totals["carbs_g"] + c,
+                    "fat_g": totals["fat_g"] + f,
+                }
+                err = macro_error(test_totals) if macro_targets else abs(target_calories - test_totals["calories"])
+                if err < best_err:
+                    best_err = err
+                    best_choice = (p_row, grams, kcal, p, c, f)
+            if best_choice and best_err < current_err:
+                p_row, grams, kcal, p, c, f = best_choice
+                items.append(PlanItem("product", p_row["id"], grams / 100.0, kcal, p, c, f, p_row["name"]))
+                totals = _totals(items)
+            else:
+                break
 
     # Save plan
     from .db import save_meal_plan
