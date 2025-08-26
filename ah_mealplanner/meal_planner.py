@@ -60,6 +60,16 @@ def generate_daily_plan(
     slot_names: Optional[List[str]] = None,
 ):
     exclusions = exclusions or []
+    if macro_targets is None:
+        try:
+            p_ratio, f_ratio, c_ratio = macro_split
+            macro_targets = {
+                "protein_g": target_calories * p_ratio / 4.0,
+                "fat_g": target_calories * f_ratio / 9.0,
+                "carbs_g": target_calories * c_ratio / 4.0,
+            }
+        except Exception:
+            macro_targets = None
     cur = conn.cursor()
     recipes = cur.execute("SELECT * FROM recipes").fetchall()
     products = cur.execute("SELECT * FROM products").fetchall()
