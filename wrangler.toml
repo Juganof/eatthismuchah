@@ -10,8 +10,7 @@ crons = ["0 3 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "ah-macro-planner"
-# Replace with the id printed by: wrangler d1 create ah-macro-planner
-database_id = "REPLACE_ME"
+database_id = "c05c3aa9-97b5-4c93-8208-5ea1ce6d8248"
 
 [vars]
 # Outgoing identity used for every ah.nl / api.ah.nl request.
