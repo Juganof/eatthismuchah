@@ -1,69 +1,93 @@
-AH Personal Meal Planner
+# AH Macro Planner
 
-Personal-use meal planner that builds daily menus from Dutch recipes (Allerhande and others) and local products (Albert Heijn). It stores data in a local SQLite DB and provides a simple CLI to ingest and plan meals.
+Haalt Allerhande-recepten op, zoekt de voedingswaarde van elk ingrediënt op via de
+AH-productcatalogus, en herberekent de hoeveelheden zodat een gerecht aan jouw
+macro-doelen voldoet — bijvoorbeeld "diner met 60 g eiwit en 700 kcal".
 
-Features
-- Local SQLite database (no cloud) for personal use
-- Ingest recipes from recipe URLs (parses JSON-LD from pages like Allerhande)
-- Import Albert Heijn products from a JSON/CSV export you control
-- Generate daily meal plans targeting calories and macros
+Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon gebruiken.
 
-Status
-- Scrapers are designed for personal use and to be run by you. The Allerhande parser works from a recipe URL with JSON-LD. The AH product scraper is left as a stub because AH site/API may change and can require anti-bot work; for personal use, import products from your own JSON/CSV export.
+## Hoe het werkt
 
-Quick Start
-1) Initialize the DB:
-   python -m ah_mealplanner.cli init-db
+1. **Scrapen** — `src/ah/` haalt recepten van ah.nl en producten van de AH-app-API.
+2. **Omrekenen** — `src/nutrition/units.ts` zet "2 el olijfolie" om naar grammen via
+   dichtheid- en stukgewicht-tabellen; alles verderop rekent in grammen, want
+   AH-voedingswaarden zijn per 100 g.
+3. **Matchen** — `src/nutrition/match.ts` koppelt een receptregel aan een AH-product
+   en geeft een betrouwbaarheidsscore. Onder 0,4 melden we "geen match" in plaats van
+   te gokken.
+4. **Optimaliseren** — `src/optimize/solver.ts` kiest per ingrediënt een schaalfactor
+   binnen redelijke grenzen. Het probleem is convex-kwadratisch, dus projected
+   gradient descent vindt het globale optimum: geen heuristiek, geen willekeur.
 
-2) Ingest your own data
+Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
+en ingrediënten kun je vastzetten met `locked`.
 
-   - Import AH products from your JSON/CSV export:
-     python -m ah_mealplanner.cli import-products --file /path/to/your/products.json
+## Opzetten
 
-   - Ingest a recipe from a URL (e.g., Allerhande):
-     python -m ah_mealplanner.cli ingest-allerhande --url "https://www.ah.nl/allerhande/recept/..."
+```bash
+npm install
+npx wrangler d1 create ah-macro-planner   # zet de database_id in wrangler.toml
+npm run db:init                            # maakt de tabellen aan
+npm run deploy
+```
 
-3) Generate a meal plan for a day
-   python -m ah_mealplanner.cli plan-day --calories 2200 --meals 3 --exclude "noten,pinda" --date today
+Daarna eenmalig vullen — dit is de trage stap, want elk nieuw ingrediënt kost een
+productlookup:
 
-Data Model (simplified)
-- products: AH products with nutrition per 100g/ml and metadata
-- recipes: Recipes with per-serving nutrition and ingredients
-- ingredients: Linked to recipes; can optionally map to products
-- meal_plans + meal_plan_items: Saved plans by date
+```bash
+curl -X POST https://<jouw-worker>.workers.dev/api/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"queries":["kip","zalm","pasta","vegetarisch"],"limit":40}'
+```
 
-Notes on Scraping and Legality
-- This code is for your personal use only. Respect website terms, robots.txt, and rate limits. Prefer exporting data you’ve obtained legitimately (e.g., via your own browsing data or manual export) over automated scraping.
+Een cron in `wrangler.toml` vult de cache daarna elke nacht verder aan.
 
-Full-Site Crawling (Personal Use)
-- Discover + ingest many recipes via sitemaps:
-  - python -m ah_mealplanner.cli crawl-allerhande --limit 500
-  - Add specific sitemaps with --sitemap URL (repeatable)
-- Discover + ingest many AH products via sitemaps:
-  - python -m ah_mealplanner.cli crawl-ah-products --limit 500
-  - Product parsing is best-effort (JSON-LD / Next.js data); adjust in `ingest_ah.py` if AH changes.
+## Gebruik
 
-Customize Targets
-- You can pass calories and meals per day via CLI. Macro targets default to 30% protein, 35% fat, 35% carbs but can be changed with flags.
+Open de worker-URL op je telefoon: vul eiwit, calorieën en porties in, en je krijgt
+recepten terug met per ingrediënt de aangepaste hoeveelheid.
 
-Files
-- ah_mealplanner/db.py: SQLite connection + schema
-- ah_mealplanner/ingest_allerhande.py: Recipe ingestion via JSON-LD
-- ah_mealplanner/ingest_ah.py: AH products import + stub scraper
-- ah_mealplanner/meal_planner.py: Simple greedy planner
-- ah_mealplanner/cli.py: CLI entry point
-- ah_mealplanner/web: Minimal Flask web UI (browse, plan)
+### API
 
-Web UI (local)
-- Install Flask: pip install flask
-- Run server:
-  - python -m ah_mealplanner.web
-- Open http://127.0.0.1:5000
-- Pages:
-  - /: stats and recent plans
-  - /recipes, /recipes/<id>: browse and view recipes
-  - /products: browse products
-  - /plan: generate a plan and view by date
-  - /plan-week: generate plans for a week (or N days) and jump to shopping list
-  - /shopping-list?start=YYYY-MM-DD&days=N: aggregated ingredients and products
-  - /admin: trigger recipe/product crawls and view recent crawl errors and progress
+| Route | Doel |
+| --- | --- |
+| `POST /api/generate` | Doelen in, best passende herberekende recepten uit |
+| `POST /api/plan` | Eén specifiek recept herberekenen (`recipeId`) |
+| `GET /api/recipe/:id` | Voedingswaarde per ingrediënt, zonder herberekening |
+| `GET /api/search?q=` | Live Allerhande-zoekopdracht |
+| `POST /api/ingest` | Recepten scrapen en de cache vullen |
+| `POST /api/match` | Een foute ingrediënt→product-koppeling corrigeren |
+| `GET /api/probe` | Welke AH-endpoints het nog doen |
+
+```bash
+curl -X POST https://<jouw-worker>.workers.dev/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"protein":60,"kcal":700,"kcalMode":"max","portions":2}'
+```
+
+## Belangrijk om te weten
+
+**De AH-endpoints zijn niet officieel.** AH publiceert geen API; alles hier is wat de
+eigen app en website gebruiken en kan zonder aankondiging veranderen. De code is daar
+zo goed mogelijk tegen bestand — de HTML-parser zoekt naar de vorm van een recept in
+de ingebouwde paginastate in plaats van naar CSS-selectors — maar als resultaten leeg
+blijven, vraag dan eerst `GET /api/probe` op: die zegt welke stap stuk is.
+
+**De endpoints zijn niet live geverifieerd.** Ze zijn geschreven op basis van hoe de
+AH-app werkt, maar de omgeving waarin dit gebouwd is kon ah.nl niet bereiken. Reken
+erop dat je bij de eerste deploy `src/ah/client.ts` moet bijstellen; `/api/probe` en
+de tests in `test/parse.test.ts` zijn daarvoor het startpunt.
+
+**Voedingswaarden zijn schattingen.** Stukgewichten ("1 ui = 110 g") en dichtheden
+zijn tabelwaarden, productmatching is fuzzy, en niet elk ingrediënt heeft een
+AH-product. Elk plan meldt daarom `coverage`: het aandeel van het receptgewicht
+waarvoor we echte voedingswaarden hebben. Onder 80% waarschuwt de UI expliciet, want
+dan zijn de totalen een onderschatting.
+
+## Ontwikkelen
+
+```bash
+npm test          # 58 tests, geen netwerk nodig
+npm run typecheck
+npm run dev
+```
