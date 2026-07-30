@@ -1,0 +1,145 @@
+import { describe, expect, it } from "vitest";
+import { collectRecipes, parseIngredientText, parseNutrition } from "../src/ah/client";
+import { deepFind, extractEmbeddedJson } from "../src/ah/scrape";
+
+describe("extractEmbeddedJson", () => {
+  it("pulls the Next.js state out of a page", () => {
+    const html = `<html><body><script id="__NEXT_DATA__" type="application/json">{"a":1}</script></body></html>`;
+    expect(extractEmbeddedJson(html)).toEqual([{ a: 1 }]);
+  });
+
+  it("collects every ld+json block, not just the first", () => {
+    const html = `<script type="application/ld+json">{"a":1}</script>
+                  <script type="application/ld+json">{"b":2}</script>`;
+    expect(extractEmbeddedJson(html)).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it("skips unparseable blocks instead of throwing", () => {
+    const html = `<script id="__NEXT_DATA__">not json</script>`;
+    expect(extractEmbeddedJson(html)).toEqual([]);
+  });
+});
+
+describe("deepFind", () => {
+  it("finds a nested value", () => {
+    expect(deepFind({ a: { b: [{ c: 42 }] } }, (v) => v === 42)).toBe(42);
+  });
+
+  it("returns null when nothing matches", () => {
+    expect(deepFind({ a: 1 }, (v) => v === 99)).toBeNull();
+  });
+
+  it("terminates on a cyclic object", () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    expect(deepFind(cyclic, (v) => v === 1)).toBe(1);
+    expect(deepFind(cyclic, (v) => v === 99)).toBeNull();
+  });
+});
+
+describe("parseIngredientText", () => {
+  it("splits quantity, unit and name", () => {
+    expect(parseIngredientText("250 g kipfilet")).toEqual({
+      quantity: 250,
+      unit: "g",
+      name: "kipfilet",
+    });
+  });
+
+  it("handles a comma decimal", () => {
+    expect(parseIngredientText("1,5 l water").quantity).toBe(1.5);
+  });
+
+  it("handles a line with no quantity", () => {
+    expect(parseIngredientText("peper en zout")).toEqual({
+      quantity: null,
+      unit: null,
+      name: "peper en zout",
+    });
+  });
+});
+
+describe("parseNutrition", () => {
+  it("reads AH's label/value rows", () => {
+    const payload = {
+      nutritionalInformation: [
+        { name: "Energie", value: "1050 kJ" },
+        { name: "Energie (kcal)", value: "250 kcal" },
+        { name: "Eiwitten", value: "31,0 g" },
+        { name: "Koolhydraten", value: "0 g" },
+        { name: "Vetten", value: "3,6 g" },
+        { name: "waarvan verzadigde vetzuren", value: "1,1 g" },
+        { name: "Vezels", value: "2,0 g" },
+      ],
+    };
+    expect(parseNutrition(payload)).toEqual({
+      kcal: 250,
+      protein: 31,
+      carbs: 0,
+      fat: 3.6,
+      fiber: 2,
+    });
+  });
+
+  it("prefers kcal over the kJ row listed before it", () => {
+    const payload = { rows: [{ name: "Energie kJ", value: 1050 }, { name: "Energie kcal", value: 250 }] };
+    expect(parseNutrition(payload).kcal).toBe(250);
+  });
+
+  it("does not mistake saturated fat for total fat", () => {
+    const payload = { rows: [{ name: "waarvan verzadigd", value: 1.1 }, { name: "Vetten", value: 3.6 }] };
+    expect(parseNutrition(payload).fat).toBe(3.6);
+  });
+
+  it("returns an empty object for a payload with no nutrition", () => {
+    expect(parseNutrition({ title: "AH Kipfilet" })).toEqual({});
+  });
+});
+
+describe("collectRecipes", () => {
+  it("finds recipes wherever they sit in the payload", () => {
+    const payload = {
+      props: {
+        pageProps: {
+          data: {
+            recipe: {
+              id: 1193067,
+              title: "Kip met rijst",
+              servings: 4,
+              ingredients: [
+                { name: "kipfilet", quantity: 500, unit: { name: "g" } },
+                { name: "rijst", quantity: 300, unit: "g" },
+              ],
+            },
+          },
+        },
+      },
+    };
+    const [recipe] = collectRecipes(payload);
+    expect(recipe?.id).toBe("R-R1193067");
+    expect(recipe?.servings).toBe(4);
+    expect(recipe?.ingredients).toEqual([
+      { name: "kipfilet", quantity: 500, unit: "g" },
+      { name: "rijst", quantity: 300, unit: "g" },
+    ]);
+  });
+
+  it("keeps an id that is already prefixed", () => {
+    const [recipe] = collectRecipes({ id: "R-R42", title: "X", servings: 2, ingredients: [] });
+    expect(recipe?.id).toBe("R-R42");
+  });
+
+  it("de-duplicates the same recipe appearing twice", () => {
+    const one = { id: "R-R42", title: "X", servings: 2, ingredients: [] };
+    expect(collectRecipes({ a: one, b: { ...one } })).toHaveLength(1);
+  });
+
+  it("defaults servings when AH omits them", () => {
+    const [recipe] = collectRecipes({ id: "9", title: "X", ingredients: [] });
+    expect(recipe?.servings).toBe(4);
+  });
+
+  it("ignores objects that are not recipes", () => {
+    expect(collectRecipes({ id: "1", title: "just a heading" })).toEqual([]);
+  });
+});

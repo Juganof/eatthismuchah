@@ -1,0 +1,22 @@
+name = "ah-macro-planner"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+# Ingest a batch of fresh Allerhande recipes every night at 03:00 UTC.
+[triggers]
+crons = ["0 3 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ah-macro-planner"
+# Replace with the id printed by: wrangler d1 create ah-macro-planner
+database_id = "REPLACE_ME"
+
+[vars]
+# Outgoing identity used for every ah.nl / api.ah.nl request.
+AH_USER_AGENT = "Appie/8.22.3 Model/phone Android/13-M"
+# Comma-separated recipe search terms used by the nightly cron ingest.
+INGEST_QUERIES = "kip,zalm,pasta,vegetarisch,rijst,salade"
+# How many recipes the cron job ingests per run.
+INGEST_LIMIT = "40"
