@@ -4,6 +4,7 @@ import { deepFind, extractEmbeddedJson } from "./scrape";
 const AUTH_URL = "https://api.ah.nl/mobile-auth/v1/auth/token/anonymous";
 const PRODUCT_SEARCH_URL = "https://api.ah.nl/mobile-services/product/search/v2";
 const PRODUCT_DETAIL_URL = "https://api.ah.nl/mobile-services/product/detail/v4/fir";
+const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
 const RECIPE_BASE = "https://www.ah.nl/allerhande";
 
 /**
@@ -69,10 +70,16 @@ export class AhClient {
   // ---------------------------------------------------------------- products
 
   async searchProducts(query: string, size = 10): Promise<Product[]> {
-    const url = `${PRODUCT_SEARCH_URL}?query=${encodeURIComponent(query)}&size=${size}`;
+    // Ask for a few extras because AH places virtual multi-packs first for some
+    // searches; those cannot supply a meaningful per-100g nutrition record.
+    const upstreamSize = size + 10;
+    const url = `${PRODUCT_SEARCH_URL}?query=${encodeURIComponent(query)}&size=${upstreamSize}`;
     const body = (await this.apiGet(url)) as { products?: unknown[] };
     const products = Array.isArray(body.products) ? body.products : [];
-    return products.map((p) => toProductStub(p)).filter((p): p is Product => p !== null);
+    return products
+      .map((p) => toProductStub(p))
+      .filter((p): p is Product => p !== null)
+      .slice(0, size);
   }
 
   /** Full product record including nutrition, which search results omit. */
@@ -81,7 +88,14 @@ export class AhClient {
     const card = deepFind(body, (v) => isRecord(v) && "webshopId" in v && "title" in v);
     const stub = toProductStub(card ?? body);
     if (!stub) return null;
-    return { ...stub, webshopId, per100g: parseNutrition(body) };
+    let per100g = parseNutrition(body);
+    // The v4 mobile detail response stopped including nutrition in 2026. The
+    // server-rendered product page still contains a labelled per-100g table.
+    if (per100g.kcal === undefined || per100g.protein === undefined) {
+      const html = await this.htmlGet(`${PRODUCT_PAGE_URL}${encodeURIComponent(webshopId)}`);
+      per100g = parseNutritionHtml(html);
+    }
+    return { ...stub, webshopId, per100g };
   }
 
   // ----------------------------------------------------------------- recipes
@@ -100,9 +114,10 @@ export class AhClient {
       // fall through to HTML
     }
     const html = await this.htmlGet(
-      `${RECIPE_BASE}/recepten-zoeken?searchTerm=${encodeURIComponent(query)}`,
+      `${RECIPE_BASE}/recepten-zoeken?query=${encodeURIComponent(query)}`,
     );
-    return collectRecipes(extractEmbeddedJson(html)).slice(0, size);
+    const embedded = collectRecipes(extractEmbeddedJson(html));
+    return (embedded.length > 0 ? embedded : parseRecipeCards(html)).slice(0, size);
   }
 
   /** Recipe detail. Ingredient lists only ever appear in the embedded page state. */
@@ -154,6 +169,11 @@ function str(v: unknown): string | null {
 
 export function toProductStub(v: unknown): Product | null {
   if (!isRecord(v)) return null;
+  // Virtual multi-packs have no single per-100g nutrition table. Matching an
+  // ingredient to one would make the planner silently calculate with zeroes.
+  if (v["isVirtualBundle"] === true || (Array.isArray(v["bundleItems"]) && v["bundleItems"].length > 0)) {
+    return null;
+  }
   const id = v["webshopId"] ?? v["id"];
   const title = str(v["title"]) ?? str(v["name"]);
   if (id === undefined || id === null || !title) return null;
@@ -207,7 +227,7 @@ export function parseNutrition(body: unknown): Nutrients {
           // label on some payloads and in the value on others — check both.
           const withUnit = `${label} ${String(rawValue)}`;
           if (key === "kcal" && /kj/i.test(withUnit) && !/kcal/i.test(withUnit)) break;
-          out[key] = value;
+          out[key] = key === "kcal" ? kcalValue(rawValue, label) ?? value : value;
           seen.add(key);
           break;
         }
@@ -218,6 +238,33 @@ export function parseNutrition(body: unknown): Nutrients {
 
   visit(body);
   return out;
+}
+
+/** Reads AH's current server-rendered "Per 100 Gram" nutrition table. */
+export function parseNutritionHtml(html: string): Nutrients {
+  const table = html.match(
+    /<table[^>]*data-testid="nutrition-table"[^>]*>([\s\S]*?)<\/table>/i,
+  )?.[1];
+  if (!table) return {};
+
+  const rows: { name: string; value: string }[] = [];
+  for (const match of table.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells = [...(match[1] ?? "").matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
+      htmlText(m[1] ?? ""),
+    );
+    if (cells.length >= 2) rows.push({ name: cells[0]!, value: cells[1]! });
+  }
+  return parseNutrition({ rows });
+}
+
+function kcalValue(raw: unknown, label: string): number | null {
+  const text = `${label} ${String(raw)}`.replace(",", ".");
+  const match = text.match(/(\d+(?:\.\d+)?)\s*kcal/i);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+function htmlText(value: string): string {
+  return decodeHtml(value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
 }
 
 /** Recognises anything in a payload that looks like a recipe and normalises it. */
@@ -232,10 +279,18 @@ export function collectRecipes(root: unknown): Recipe[] {
     }
     if (!isRecord(v)) return;
 
-    const id = str(v["id"]) ?? (typeof v["id"] === "number" ? String(v["id"]) : null);
+    const url = str(v["href"]) ?? str(v["url"]);
+    const rawId =
+      str(v["id"]) ??
+      (typeof v["id"] === "number" ? String(v["id"]) : null) ??
+      str(v["@id"]);
+    const id = rawId ?? recipeIdFromUrl(url);
     const title = str(v["title"]) ?? str(v["name"]);
+    const isSchemaRecipe = v["@type"] === "Recipe";
     const looksLikeRecipe =
-      id !== null && title !== null && ("ingredients" in v || "servings" in v || "href" in v);
+      id !== null &&
+      title !== null &&
+      (isSchemaRecipe || "ingredients" in v || "servings" in v || "href" in v);
 
     if (looksLikeRecipe && !seenIds.has(id)) {
       const recipeId = id.startsWith("R-R") ? id : `R-R${id}`;
@@ -243,10 +298,14 @@ export function collectRecipes(root: unknown): Recipe[] {
       out.push({
         id: recipeId,
         title,
-        url: str(v["href"]) ?? `${RECIPE_BASE}/recept/${recipeId}`,
-        servings: num(v["servings"]) ?? num(deepFind(v["servings"], () => true)) ?? 4,
+        url: url ?? `${RECIPE_BASE}/recept/${recipeId}`,
+        servings:
+          num(v["servings"]) ??
+          num(v["recipeYield"]) ??
+          num(deepFind(v["servings"], () => true)) ??
+          4,
         imageUrl: findImageUrl(v),
-        ingredients: parseIngredients(v["ingredients"]),
+        ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
       });
     }
     Object.values(v).forEach(visit);
@@ -254,6 +313,45 @@ export function collectRecipes(root: unknown): Recipe[] {
 
   visit(root);
   return out;
+}
+
+/** Parses the server-rendered recipe cards used by AH's current App Router pages. */
+export function parseRecipeCards(html: string): Recipe[] {
+  const out: Recipe[] = [];
+  const seen = new Set<string>();
+  for (const match of html.matchAll(/<a\b([^>]*\bdata-testid="recipe-card"[^>]*)>/gi)) {
+    const attrs = match[1] ?? "";
+    const href = attrs.match(/\bhref="([^"]+)"/i)?.[1];
+    const titleAttr = attrs.match(/\btitle="([^"]+)"/i)?.[1];
+    const id = recipeIdFromUrl(href ?? null);
+    if (!href || !titleAttr || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: decodeHtml(titleAttr.replace(/^Recept:\s*/i, "")).trim(),
+      url: href.startsWith("http") ? href : `https://www.ah.nl${href}`,
+      servings: 4,
+      imageUrl: null,
+      ingredients: [],
+    });
+  }
+  return out;
+}
+
+function recipeIdFromUrl(url: string | null): string | null {
+  const match = url?.match(/\/recept\/(R-R\d+)/i);
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, decimal: string) => String.fromCodePoint(Number(decimal)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 function findImageUrl(v: Record<string, unknown>): string | null {

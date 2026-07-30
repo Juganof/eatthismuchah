@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { collectRecipes, parseIngredientText, parseNutrition } from "../src/ah/client";
+import {
+  collectRecipes,
+  parseIngredientText,
+  parseNutrition,
+  parseNutritionHtml,
+  parseRecipeCards,
+} from "../src/ah/client";
 import { deepFind, extractEmbeddedJson } from "../src/ah/scrape";
 
 describe("extractEmbeddedJson", () => {
@@ -94,6 +100,43 @@ describe("parseNutrition", () => {
   it("returns an empty object for a payload with no nutrition", () => {
     expect(parseNutrition({ title: "AH Kipfilet" })).toEqual({});
   });
+
+  it("takes kcal rather than kJ from a combined energy value", () => {
+    expect(parseNutrition({ rows: [{ name: "Energie", value: "538 kJ (128 kcal)" }] }).kcal).toBe(
+      128,
+    );
+  });
+});
+
+describe("parseNutritionHtml", () => {
+  it("reads AH's current product-page table", () => {
+    const html = `<table data-testid="nutrition-table"><tbody>
+      <tr><td><span>Energie</span></td><td><span>538 kJ (128 kcal)</span></td></tr>
+      <tr><td><span>Vet</span></td><td><span>4,5 g</span></td></tr>
+      <tr><td><span>Koolhydraten</span></td><td><span>2,7 g</span></td></tr>
+      <tr><td><span>Eiwitten</span></td><td><span>19 g</span></td></tr>
+    </tbody></table>`;
+    expect(parseNutritionHtml(html)).toMatchObject({
+      kcal: 128,
+      fat: 4.5,
+      carbs: 2.7,
+      protein: 19,
+    });
+  });
+});
+
+describe("toProductStub", () => {
+  it("ignores virtual multi-packs without a single nutrition table", async () => {
+    const { toProductStub } = await import("../src/ah/client");
+    expect(
+      toProductStub({
+        webshopId: 123,
+        title: "Kipfilet 4-pack",
+        isVirtualBundle: true,
+        bundleItems: [{}],
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("collectRecipes", () => {
@@ -141,5 +184,42 @@ describe("collectRecipes", () => {
 
   it("ignores objects that are not recipes", () => {
     expect(collectRecipes({ id: "1", title: "just a heading" })).toEqual([]);
+  });
+
+  it("normalises a schema.org Recipe from AH's detail page", () => {
+    const [recipe] = collectRecipes({
+      "@type": "Recipe",
+      name: "Kip 'saltimbocca'",
+      url: "https://www.ah.nl/allerhande/recept/R-R1202672/kip-saltimbocca",
+      recipeYield: "4",
+      recipeIngredient: ["500 g kipfilet", "2 el olijfolie"],
+    });
+    expect(recipe).toMatchObject({
+      id: "R-R1202672",
+      title: "Kip 'saltimbocca'",
+      servings: 4,
+      ingredients: [
+        { name: "kipfilet", quantity: 500, unit: "g" },
+        { name: "olijfolie", quantity: 2, unit: "el" },
+      ],
+    });
+  });
+});
+
+describe("parseRecipeCards", () => {
+  it("reads current server-rendered AH recipe cards", () => {
+    const html = `<a title="Recept: Kip &#x27;saltimbocca&#x27;"
+      data-testid="recipe-card"
+      href="/allerhande/recept/R-R1202672/kip-saltimbocca"></a>`;
+    expect(parseRecipeCards(html)).toEqual([
+      {
+        id: "R-R1202672",
+        title: "Kip 'saltimbocca'",
+        url: "https://www.ah.nl/allerhande/recept/R-R1202672/kip-saltimbocca",
+        servings: 4,
+        imageUrl: null,
+        ingredients: [],
+      },
+    ]);
   });
 });
