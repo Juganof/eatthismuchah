@@ -25,6 +25,8 @@ export interface DayMeal {
   position: number;
   /** Het doel dat dit moment kreeg, inclusief doorgeschoven rest. */
   targets: DailyTargets;
+  /** De zoekhints van dit moment, zodat herrollen ze mee kan sturen. */
+  slotTags: string[];
   plan: Plan | null;
   /** Ingevuld wanneer er geen recept gevonden werd. */
   note?: string;
@@ -54,12 +56,30 @@ export interface DayOptions {
 const MACRO_KEYS = ["kcal", "protein", "carbs", "fat", "fiber"] as const;
 
 /**
- * Rangschikt kandidaten voor een moment. De solverkosten zijn de basis; daar
- * bovenop tellen dingen die de solver niet kan weten: hoe betrouwbaar de
- * voedingswaarde is, of je het recept lekker vindt, en of je het pas nog at.
+ * Hoeveel van de zoekhints van een eetmoment dit recept raakt. Kwark in de
+ * ochtend hoort daaraan te voldoen, een ovenschotel niet.
  */
-function scoreOf(plan: Plan, candidate: SlotCandidate): number {
+export function tagAffinity(candidate: SlotCandidate, slotTags: string[]): number {
+  if (slotTags.length === 0) return 0;
+  const haystack = [candidate.title.toLowerCase(), ...candidate.tags].join(" ");
+  let hits = 0;
+  for (const tag of slotTags) if (tag && haystack.includes(tag)) hits++;
+  return hits;
+}
+
+/**
+ * Rangschikt kandidaten voor een moment. De solverkosten zijn de basis; daar
+ * bovenop tellen dingen die de solver niet kan weten: of het gerecht bij dit
+ * eetmoment past, hoe betrouwbaar de voedingswaarde is, of je het lekker vindt,
+ * en of je het pas nog at.
+ *
+ * De hints zijn een voorkeur en geen filter: liever een dagmenu dat qua macro's
+ * klopt met een ongebruikelijk ontbijt, dan een gat omdat er niets met kwark in
+ * de database staat.
+ */
+function scoreOf(plan: Plan, candidate: SlotCandidate, slotTags: string[]): number {
   let score = plan.cost + (1 - plan.coverage) * 2;
+  score -= Math.min(tagAffinity(candidate, slotTags), 2) * 0.8;
   if (candidate.favourite) score -= 0.75;
   score += Math.min(candidate.recentUses, 4) * 0.6;
   return score;
@@ -88,6 +108,8 @@ async function planSlot(
     excludeRecipeIds: string[];
     kcalMode?: "target" | "max";
     limit: number;
+    /** Zoekhints van het eetmoment, bv. ["kwark","havermout"]. */
+    slotTags?: string[];
     /** Gezet bij herrollen: kies iets met vergelijkbare macro's als dit profiel. */
     similarTo?: Nutrients;
   },
@@ -111,7 +133,7 @@ async function planSlot(
     const resolved = await resolveRecipe(recipe, client, store);
     const plan = planRecipe(resolved, macroTargets, { portions: 1 });
 
-    let score = scoreOf(plan, candidate);
+    let score = scoreOf(plan, candidate, options.slotTags ?? []);
     // Bij herrollen weegt gelijkenis met het vervangen gerecht net zo zwaar als
     // het doel zelf: je vroeg om iets anders, niet om iets heel anders.
     if (options.similarTo) score += macroDistance(plan.perPortion, options.similarTo) * 1.5;
@@ -171,6 +193,7 @@ export async function generateDay(
       excludeRecipeIds: chosen,
       kcalMode: options.kcalMode,
       limit: options.candidatesPerSlot ?? 25,
+      slotTags: entry.slot.tags,
     });
 
     if (plan) {
@@ -185,6 +208,7 @@ export async function generateDay(
       slotName: entry.slot.name,
       position: entry.slot.position,
       targets,
+      slotTags: entry.slot.tags,
       plan,
       ...(plan ? {} : { note: "geen passend recept in de database — scrape er meer met /api/ingest" }),
     });
@@ -206,6 +230,8 @@ export interface RerollOptions {
   excludeRecipeIds: string[];
   /** Macro's van het vervangen gerecht; het alternatief blijft hier dichtbij. */
   similarTo?: Nutrients;
+  /** Zoekhints van het eetmoment waar dit voor is. */
+  slotTags?: string[];
   diet?: string[];
   excludedTerms?: string[];
   kcalMode?: "target" | "max";
@@ -224,6 +250,7 @@ export async function rerollSlot(
     excludeRecipeIds: options.excludeRecipeIds,
     kcalMode: options.kcalMode,
     limit: options.candidates ?? 30,
+    slotTags: options.slotTags,
     similarTo: options.similarTo,
   });
 }

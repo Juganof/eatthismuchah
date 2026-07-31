@@ -373,6 +373,7 @@ app.post("/api/day/reroll", async (c) => {
     targets: body.targets,
     excludeRecipeIds: body.excludeRecipeIds ?? [],
     similarTo: body.similarTo,
+    slotTags: body.slotTags,
     diet: profile.diet,
     excludedTerms: await store.getExclusions(),
     kcalMode: body.kcalMode,
@@ -516,6 +517,7 @@ interface RerollRequest {
   targets?: DailyTargets;
   excludeRecipeIds?: string[];
   similarTo?: DailyTargets;
+  slotTags?: string[];
   kcalMode?: "target" | "max";
   candidates?: number;
 }

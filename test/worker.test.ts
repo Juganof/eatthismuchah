@@ -24,7 +24,14 @@ describe("Worker routes", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
     expect(html).toContain("AH Macro Planner");
-    expect(html).toContain("/api/generate");
+    // De vier tabbladen en de endpoints waar ze op leunen zitten in één document,
+    // dus als er eentje uit de bundel valt, valt deze test om.
+    for (const tab of ["panel-profiel", "panel-momenten", "panel-dag", "panel-week"]) {
+      expect(html, `tab ${tab} ontbreekt`).toContain(tab);
+    }
+    for (const route of ["/api/profile", "/api/slots", "/api/day/generate", "/api/day/reroll", "/api/shopping"]) {
+      expect(html, `${route} wordt niet aangeroepen`).toContain(route);
+    }
   });
 
   it("reports empty database statistics", async () => {

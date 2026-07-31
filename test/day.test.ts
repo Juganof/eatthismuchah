@@ -194,16 +194,27 @@ describe("rerollSlot", () => {
     });
 
     const dinner = day.meals.at(-1)!;
-    const replacement = await rerollSlot(store, client, {
+    const original = dinner.plan!;
+    const exclude = [original.recipeId];
+
+    const similar = await rerollSlot(store, client, {
       targets: dinner.targets,
-      excludeRecipeIds: [dinner.plan!.recipeId],
-      similarTo: dinner.plan!.perPortion,
+      excludeRecipeIds: exclude,
+      similarTo: original.perPortion,
+    });
+    // Zelfde vraag zonder de gelijkenis-eis, als vergelijkingsmateriaal.
+    const anything = await rerollSlot(store, client, {
+      targets: dinner.targets,
+      excludeRecipeIds: exclude,
     });
 
-    expect(replacement).not.toBeNull();
-    expect(replacement!.recipeId).not.toBe(dinner.plan!.recipeId);
-    // "Vergelijkbaar" is geen exacte eis, maar wel dezelfde orde van grootte.
-    expect(macroDistance(replacement!.perPortion, dinner.plan!.perPortion)).toBeLessThan(2);
+    expect(similar).not.toBeNull();
+    expect(similar!.recipeId).not.toBe(original.recipeId);
+    // Dit is waar `similarTo` voor is: het alternatief hoort dichter bij het
+    // vervangen gerecht te liggen dan wat de planner anders had gekozen.
+    expect(macroDistance(similar!.perPortion, original.perPortion)).toBeLessThanOrEqual(
+      macroDistance(anything!.perPortion, original.perPortion),
+    );
   });
 
   it("gives up rather than repeating something you already rejected", async () => {
