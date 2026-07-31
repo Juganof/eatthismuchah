@@ -44,6 +44,42 @@ export function sumNutrients(items: Nutrients[]): Nutrients {
   return out;
 }
 
+export type MatchOutcome = "matched" | "no-match";
+
+/**
+ * Zoekt het product voor één ingredientnaam en onthoudt de uitkomst — gedeeld
+ * door plannen (via `resolveProduct`, hieronder) en de achtergrond-enrichment
+ * (`enrichIngredientMatches` in `src/ingest/pipeline.ts`). Gooit door bij een
+ * netwerk- of blokkadefout, zodat de aanroeper die apart kan tellen; alleen een
+ * bevestigd "geen product gevonden" wordt als negatieve match onthouden.
+ */
+export async function lookupIngredientMatch(
+  name: string,
+  client: AhClient,
+  store: Store,
+): Promise<{ outcome: MatchOutcome; product: Product | null; score: number }> {
+  const candidates = await client.searchProducts(searchTermFor(name), 8);
+
+  const match = bestMatch(name, candidates);
+  if (!match) {
+    await store.putMatch(name, null, 0);
+    return { outcome: "no-match", product: null, score: 0 };
+  }
+
+  // Search results carry no nutrition, so fetch the detail record.
+  let full = await store.getProduct(match.product.webshopId);
+  if (!full) {
+    full = await client.getProduct(match.product.webshopId);
+    if (full) await store.putProduct(full);
+  }
+  // Geen bruikbaar productdetail: niet als negatieve match onthouden, want dit is
+  // net zo goed "probeer het later nog eens" als een netwerkfout.
+  if (!full) return { outcome: "no-match", product: null, score: 0 };
+
+  await store.putMatch(name, full.webshopId, match.score);
+  return { outcome: "matched", product: full, score: match.score };
+}
+
 /**
  * Finds the AH product for one ingredient line, consulting the cache first. Failed
  * lookups are cached too — an ingredient that has no sensible product ("water",
@@ -67,35 +103,14 @@ async function resolveProduct(
   // dat in de minuten. Onbekend is dan gewoon onbekend.
   if (cacheOnly) return { product: null, score: 0 };
 
-  let candidates: Product[];
   try {
-    candidates = await client.searchProducts(searchTermFor(ingredient.name), 8);
+    const { product, score } = await lookupIngredientMatch(ingredient.name, client, store);
+    return { product, score };
   } catch {
     // A failed search must not poison the cache: leave it unrecorded so the next
     // request tries again rather than remembering a network blip as "no match".
     return { product: null, score: 0 };
   }
-
-  const match = bestMatch(ingredient.name, candidates);
-  if (!match) {
-    await store.putMatch(ingredient.name, null, 0);
-    return { product: null, score: 0 };
-  }
-
-  // Search results carry no nutrition, so fetch the detail record.
-  let full = await store.getProduct(match.product.webshopId);
-  if (!full) {
-    try {
-      full = await client.getProduct(match.product.webshopId);
-    } catch {
-      return { product: null, score: 0 };
-    }
-    if (full) await store.putProduct(full);
-  }
-  if (!full) return { product: null, score: 0 };
-
-  await store.putMatch(ingredient.name, full.webshopId, match.score);
-  return { product: full, score: match.score };
 }
 
 /**
@@ -144,4 +159,32 @@ export function coverageOf(resolved: ResolvedRecipe): number {
     if (ing.product && Object.keys(ing.product.per100g).length > 0) matched += ing.grams;
   }
   return total > 0 ? matched / total : 0;
+}
+
+/**
+ * Herschaalt elk ingredient-nutrient met dezelfde factor per macro, zodat de som
+ * exact AH's eigen (betrouwbaardere) receptotaal haalt. De verhouding tussen
+ * ingredienten — kwark heeft meer eiwit dan een banaan — komt nog steeds uit de
+ * echte productdata; alleen de absolute schaal wordt gecorrigeerd, en geklemd
+ * zodat een enkel raar product de rest niet kan ontsporen.
+ */
+export function calibrateToTotal(resolved: ResolvedRecipe, ahTotal: Nutrients): ResolvedRecipe {
+  const factors: Partial<Record<keyof Nutrients, number>> = {};
+  for (const key of NUTRIENT_KEYS) {
+    const current = resolved.total[key];
+    const target = ahTotal[key];
+    if (!current || !target) continue;
+    factors[key] = Math.min(2, Math.max(0.5, target / current));
+  }
+
+  const ingredients: ResolvedIngredient[] = resolved.ingredients.map((ing) => {
+    const nutrients: Nutrients = {};
+    for (const [key, value] of Object.entries(ing.nutrients)) {
+      const factor = factors[key as keyof Nutrients] ?? 1;
+      nutrients[key as keyof Nutrients] = value * factor;
+    }
+    return { ...ing, nutrients };
+  });
+
+  return { ...resolved, ingredients, total: sumNutrients(ingredients.map((i) => i.nutrients)) };
 }

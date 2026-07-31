@@ -254,6 +254,10 @@ function mealHead(meal) {
 }
 
 function planCard(meal) {
+  // Er staan keuzekaarten klaar: die krijgen voorrang op de vaste kaart, zolang
+  // er nog niet definitief gekozen is.
+  if (meal.options) return optionsCard(meal);
+
   const p = meal.plan;
   // Nog niets ingevuld: toon wél het moment en zijn doel, met een knop om juist
   // dit moment te vullen. Zo zie je hoe je dag eruitziet voordat er iets staat.
@@ -265,27 +269,79 @@ function planCard(meal) {
       + '</div>';
   }
 
+  // In uniforme modus heeft geen enkel ingredient een eigen match, dus is een
+  // vlag per regel ruis in plaats van informatie — die regels krijgen in
+  // plaats daarvan één uitleg hieronder.
   const rows = p.ingredients.map((i) => {
-    const flag = i.unmatched ? ' <span class="muted">(geen voedingswaarde)</span>' : '';
+    const flag = p.scalingMode === "solver" && i.unmatched
+      ? ' <span class="muted">(geen voedingswaarde)</span>'
+      : '';
     return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span><span class="amt">' + amountFor(i) + '</span></div>';
   }).join("");
 
-  const lowCoverage = p.coverage < 0.8
-    ? '<p class="note">Let op: voor ' + Math.round((1 - p.coverage) * 100)
-      + '% van het gewicht is geen voedingswaarde gevonden, de totalen zijn dus een onderschatting.</p>'
-    : "";
+  const scalingNote = p.scalingMode === "uniform"
+    ? '<p class="muted">De voedingswaarde van dit recept komt van AH zelf en klopt dus. Welk '
+      + 'ingredi\\u00ebnt welke macro levert weten we nog niet, dus is alles met dezelfde factor ('
+      + '\\u00d7' + formatQty(uniformFactor(p)) + ') geschaald in plaats van per ingredi\\u00ebnt. '
+      + 'Zodra de koppelingen zijn aangevuld kan de planner w\\u00e9l gericht bijsturen.</p>'
+    : p.coverage < 0.8
+      ? '<p class="note">Let op: voor ' + Math.round((1 - p.coverage) * 100)
+        + '% van het gewicht (de gemarkeerde regels) is geen voedingswaarde gevonden, dus is de '
+        + 'bijdrage van die ingredi\\u00ebnten een onderschatting.</p>'
+      : "";
 
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
     + mealHead(meal)
     + '<strong>' + escapeHtml(p.title) + '</strong>'
     + macroChips(p.perPortion)
     + rows
-    + lowCoverage
+    + scalingNote
     + '<div class="actions">'
     + '<button class="secondary small reroll" type="button">&#128260; Ander recept</button>'
     + '<button class="secondary small fav" type="button">&#9829; Favoriet</button>'
     + '<button class="secondary small block" type="button">&#9940; Nooit meer</button>'
     + '<a class="muted" style="align-self:center" href="' + p.url + '" target="_blank" rel="noopener">Bereiding op ah.nl</a>'
+    + '</div></div>';
+}
+
+/** In uniforme modus schaalt elk ingredient met dezelfde factor; pak 'm van de eerste. */
+function uniformFactor(plan) {
+  return plan.ingredients.length ? plan.ingredients[0].scale : 1;
+}
+
+/** Korte samenvatting van hoeveel er aan een plan is gesleuteld. */
+function scaleSummary(plan) {
+  if (plan.scalingMode === "uniform") {
+    const factor = uniformFactor(plan);
+    return Math.abs(factor - 1) > 0.05 ? "alles \\u00d7 " + formatQty(factor) : "ongewijzigd";
+  }
+  const changed = plan.ingredients.filter((i) => Math.abs(i.scale - 1) > 0.05).length;
+  return changed === 0
+    ? "ongewijzigd"
+    : changed + " van " + plan.ingredients.length + " ingredi\\u00ebnten aangepast";
+}
+
+/** Eén keuzekaart: een tik erop kiest hem meteen, dus dit is een <button>. */
+function optionCard(option, index) {
+  const p = option.plan;
+  const bucketLabel = option.bucket === "origineel" ? "zoals het recept" : "aangepast aan je doel";
+  return '<button class="option" type="button" data-index="' + index + '">'
+    + '<strong>' + escapeHtml(p.title) + '</strong>'
+    + '<div class="macros"><span class="macro">' + bucketLabel + '</span></div>'
+    + macroChips(p.perPortion)
+    + '<p class="muted" style="margin:4px 0 0">' + escapeHtml(scaleSummary(p)) + '</p>'
+    + '</button>';
+}
+
+/** Kaart met een handvol opties in plaats van één vast plan. */
+function optionsCard(meal) {
+  return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
+    + mealHead(meal)
+    + '<p class="muted">Kies er een:</p>'
+    + '<div class="options">' + meal.options.map(optionCard).join("") + '</div>'
+    + '<div class="actions">'
+    + '<button class="secondary small more" type="button">Meer opties</button>'
+    + '<button class="secondary small cancelOptions" type="button">Annuleren</button>'
     + '</div></div>';
 }
 
@@ -332,6 +388,19 @@ function bindMealButtons() {
     const meal = mealFor(slotId);
     if (!meal) return;
 
+    // Er staan keuzekaarten: die aan elkaar knopen, niks anders op deze kaart.
+    if (meal.options) {
+      card.querySelectorAll(".option").forEach((button) => {
+        button.onclick = () => chooseOption(meal, Number(button.dataset.index));
+      });
+      card.querySelector(".more").onclick = (event) => run(event.target, () => moreOptions(meal));
+      card.querySelector(".cancelOptions").onclick = () => {
+        meal.options = null;
+        renderDay(currentDay);
+      };
+      return;
+    }
+
     // Leeg moment: één knop, om juist dit moment in te vullen.
     if (!meal.plan) {
       const fill = card.querySelector(".fill");
@@ -347,14 +416,45 @@ function bindMealButtons() {
     });
 
     // Blokkeren zonder vervanging zou het geblokkeerde gerecht op het scherm
-    // laten staan, dus zoek er meteen iets anders bij.
+    // laten staan, dus zoek er meteen iets anders bij. Toast eerst: replaceMeal
+    // toont zo meteen de keuzekaarten, en dan moet de blokkade-melding al gezien zijn.
     card.querySelector(".block").onclick = (event) => run(event.target, async () => {
       const title = meal.plan.title;
       await postJson("/api/prefs", { recipeId: meal.plan.recipeId, status: "blocked" });
-      await replaceMeal(meal);
       toast("Geblokkeerd: " + title + ". Komt niet meer terug.");
+      await replaceMeal(meal);
     });
   });
+}
+
+/** Toont een set keuzekaarten voor dit moment; kiezen commit pas bij een tik. */
+function showOptions(meal, options) {
+  // Elke getoonde optie telt als "al gezien", zodat "meer opties" nooit herhaalt.
+  rejected[meal.slotId] = (rejected[meal.slotId] || []).concat(options.map((o) => o.plan.recipeId));
+  meal.options = options;
+  renderDay(currentDay);
+}
+
+/** Eén tik = gekozen: meteen definitief, zoals het bestaande commit-patroon. */
+function chooseOption(meal, index) {
+  meal.plan = meal.options[index].plan;
+  meal.options = null;
+  meal.note = undefined;
+  recomputeTotals();
+  renderDay(currentDay);
+}
+
+/** Nieuwe set opties, met alles wat al getoond is uitgesloten. */
+async function moreOptions(meal) {
+  const data = await postJson("/api/day/reroll", {
+    targets: meal.targets,
+    excludeRecipeIds: (rejected[meal.slotId] || []).concat(chosenToday(meal.slotId)),
+    similarTo: meal.plan ? meal.plan.perPortion : undefined,
+    slotTags: meal.slotTags || [],
+    kcalMode: $("dayKcalMode").value,
+    optionCount: 4
+  });
+  showOptions(meal, data.options);
 }
 
 /** Vult één leeg eetmoment in, zonder de rest van de dag aan te raken. */
@@ -363,12 +463,10 @@ async function fillMeal(meal) {
     targets: meal.targets,
     excludeRecipeIds: chosenToday(meal.slotId),
     slotTags: meal.slotTags || [],
-    kcalMode: $("dayKcalMode").value
+    kcalMode: $("dayKcalMode").value,
+    optionCount: 4
   });
-  meal.plan = data.plan;
-  meal.note = undefined;
-  recomputeTotals();
-  renderDay(currentDay);
+  showOptions(meal, data.options);
 }
 
 /** De recepten die vandaag al ergens anders staan; die wil je niet dubbel. */
@@ -378,7 +476,7 @@ function chosenToday(exceptSlotId) {
     .map((m) => m.plan.recipeId);
 }
 
-/** Zoekt een ander recept voor dit moment en zet het op het scherm. */
+/** Zoekt andere recepten voor dit moment en toont ze als keuzekaarten. */
 async function replaceMeal(meal) {
   rejected[meal.slotId] = (rejected[meal.slotId] || []).concat([meal.plan.recipeId]);
   const data = await postJson("/api/day/reroll", {
@@ -387,11 +485,10 @@ async function replaceMeal(meal) {
     excludeRecipeIds: rejected[meal.slotId].concat(chosenToday(meal.slotId)),
     similarTo: meal.plan.perPortion,
     slotTags: meal.slotTags || [],
-    kcalMode: $("dayKcalMode").value
+    kcalMode: $("dayKcalMode").value,
+    optionCount: 4
   });
-  meal.plan = data.plan;
-  recomputeTotals();
-  renderDay(currentDay);
+  showOptions(meal, data.options);
 }
 
 /** Na een herrolling klopt het dagtotaal niet meer; opnieuw optellen. */
@@ -518,8 +615,18 @@ function browseMatch(m) {
     ? '<a href="https://www.ah.nl/producten/product/wi' + encodeURIComponent(m.webshopId)
       + '" target="_blank" rel="noopener">' + escapeHtml(m.productTitle || m.webshopId) + '</a>'
     : '<span class="warnish">geen product gevonden</span>';
+  const name = encodeURIComponent(m.ingredientName);
   return '<div class="row"><span>' + escapeHtml(m.ingredientName) + ' &rarr; ' + target + '</span>'
-    + '<span class="amt">' + (m.webshopId ? Math.round(m.score * 100) + '%' : '') + '</span></div>';
+    + '<span class="amt">' + (m.webshopId ? Math.round(m.score * 100) + '% ' : '')
+    + '<button class="small secondary match-correct" type="button" data-ingredient="' + name + '">corrigeren</button>'
+    + '</span></div>'
+    + '<div class="match-fix" data-ingredient="' + name + '" hidden>'
+    + '<div class="actions">'
+    + '<input type="search" class="match-fix-q" placeholder="zoek een product&hellip;">'
+    + '<button class="small secondary match-fix-search" type="button">Zoek</button>'
+    + '</div>'
+    + '<div class="match-fix-results"></div>'
+    + '</div>';
 }
 
 function browseScrape(s) {
@@ -571,6 +678,55 @@ document.querySelectorAll(".browse-kind").forEach((button) => {
   };
 });
 
+/** Eén product-kandidaat, aantikbaar om als koppeling te kiezen. */
+function matchPickRow(product, ingredientAttr) {
+  const size = product.salesUnitSize
+    ? ' <span class="muted">(' + escapeHtml(product.salesUnitSize) + ')</span>'
+    : '';
+  return '<div class="row"><span>' + escapeHtml(product.title) + size + '</span>'
+    + '<button class="small secondary match-pick" type="button" data-ingredient="' + ingredientAttr
+    + '" data-webshop="' + escapeHtml(String(product.webshopId)) + '">kies</button></div>';
+}
+
+// Eén gedelegeerde listener op #browseOut: de rijen erin worden steeds
+// vervangen via innerHTML, maar #browseOut zelf niet, dus hoeft dit niet na
+// elke herlaadbeurt opnieuw aangehaakt te worden.
+$("browseOut").addEventListener("click", (event) => {
+  const correct = event.target.closest(".match-correct");
+  if (correct) {
+    const panel = document.querySelector('.match-fix[data-ingredient="' + correct.dataset.ingredient + '"]');
+    const opening = panel.hidden;
+    document.querySelectorAll(".match-fix").forEach((p) => { p.hidden = true; });
+    panel.hidden = !opening;
+    return;
+  }
+
+  const search = event.target.closest(".match-fix-search");
+  if (search) {
+    run(search, async () => {
+      const panel = search.closest(".match-fix");
+      const q = panel.querySelector(".match-fix-q").value.trim();
+      const results = panel.querySelector(".match-fix-results");
+      if (!q) { results.innerHTML = ""; return; }
+      const data = await api("/api/products/search?q=" + encodeURIComponent(q));
+      results.innerHTML = data.products.length
+        ? data.products.map((p) => matchPickRow(p, panel.dataset.ingredient)).join("")
+        : '<p class="muted">Niets gevonden.</p>';
+    });
+    return;
+  }
+
+  const pick = event.target.closest(".match-pick");
+  if (pick) {
+    run(pick, async () => {
+      const ingredient = decodeURIComponent(pick.dataset.ingredient);
+      await postJson("/api/match", { ingredient: ingredient, webshopId: pick.dataset.webshop });
+      toast("Gekoppeld: " + ingredient);
+      loadBrowse();
+    });
+  }
+});
+
 let browseTimer = null;
 $("browseQuery").oninput = () => {
   // Wachten tot je uitgetypt bent; anders vuurt elke toetsaanslag een query af.
@@ -619,6 +775,14 @@ $("repair").onclick = () => run($("repair"), async () => {
   loadStats();
 });
 
+$("enrich").onclick = () => run($("enrich"), async () => {
+  const r = await postJson("/api/enrich", { limit: 15 });
+  if (r.message) { toast(r.message); return; }
+  toast(r.matched + " van " + r.examined + " ingredienten gekoppeld; nog " + r.remaining + " te gaan.");
+  loadStats();
+  loadAutoStatus();
+});
+
 $("reparse").onclick = () => run($("reparse"), async () => {
   const r = await postJson("/api/reparse", {});
   toast(r.recovered + " van " + r.examined + " recepten hersteld uit het archief.");
@@ -632,6 +796,7 @@ function renderAutoStatus(s) {
     + '<span class="macro">vandaag <b>' + binnen + ' / ' + s.dagbudget + '</b></span>'
     + '<span class="macro">rondes <b>' + (v.runs || 0) + '</b></span>'
     + '<span class="macro">nog leeg <b>' + s.openLegeRecepten + '</b></span>'
+    + '<span class="macro">nog koppelingen <b>' + (s.openKoppelingen || 0) + '</b></span>'
     + '<span class="macro">hierna <b>' + escapeHtml(s.volgende || "-") + '</b></span>'
     + '</div>';
 
@@ -651,7 +816,9 @@ function renderAutoStatus(s) {
   const laatste = (s.rondes || []).slice(0, 5).map((r) => {
     const wat = r.mode === "repair"
       ? r.repaired + " aangevuld"
-      : r.added + " opgehaald";
+      : r.mode === "enrich"
+        ? r.repaired + " koppelingen"
+        : r.added + " opgehaald";
     const geblokkeerd = r.blocked ? ' <span class="warnish">(' + r.blocked + 'x geblokkeerd)</span>' : "";
     const tijd = new Date(r.started_at).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
     return '<div class="row"><span>' + tijd + ' &middot; ' + escapeHtml(r.detail || r.mode) + '</span>'

@@ -2,7 +2,7 @@ import { AhClient } from "../ah/client";
 import type { Nutrients, Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
-import { coverageOf, resolveRecipe } from "../nutrition/resolve";
+import { coverageOf, lookupIngredientMatch, resolveRecipe } from "../nutrition/resolve";
 
 /**
  * Het scrapen zelf, los van de routes. Zowel de knoppen in de UI als de
@@ -205,4 +205,53 @@ export async function repairEmptyRecipes(
   }
 
   return { examined: ids.length, repaired, blocked, errors };
+}
+
+export interface EnrichResult {
+  /** Namen geprobeerd. */
+  examined: number;
+  /** Aan een product gekoppeld. */
+  matched: number;
+  /** Gezocht, maar niets bruikbaars gevonden — ook een resultaat, wordt onthouden. */
+  unmatched: number;
+  blocked: number;
+  errors: string[];
+}
+
+/**
+ * Vult ingredient -> product koppelingen aan voor namen die nog nooit opgezocht
+ * zijn. Dit is bewust GEEN onderdeel van het binnenhalen van een recept
+ * (`computeNutrition` hierboven): daar nemen we AH's eigen voedingswaarde over
+ * en doen we nul productzoekopdrachten. Zonder deze aparte, lager-prioriteit
+ * ronde blijft `ingredient_matches` voor bijna elk recept leeg, en kan de
+ * planner dus nooit "meer kwark, minder granola" — alleen alles met dezelfde
+ * factor schalen (zie `planUniform` in `src/optimize/plan.ts`).
+ */
+export async function enrichIngredientMatches(
+  env: ScrapeEnv,
+  limit: number,
+  clientOptions?: ClientOptions,
+): Promise<EnrichResult> {
+  const store = new Store(env.DB);
+  const names = await store.ingredientNamesWithoutMatch(limit);
+  if (names.length === 0) return { examined: 0, matched: 0, unmatched: 0, blocked: 0, errors: [] };
+
+  const client = scrapeClient(env, store, clientOptions);
+  let matched = 0;
+  let unmatched = 0;
+  let blocked = 0;
+  const errors: string[] = [];
+
+  for (const { name } of names) {
+    try {
+      const { outcome } = await lookupIngredientMatch(name, client, store);
+      if (outcome === "matched") matched++;
+      else unmatched++;
+    } catch (err) {
+      if (isBlocked(err)) blocked++;
+      errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { examined: names.length, matched, unmatched, blocked, errors };
 }

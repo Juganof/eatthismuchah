@@ -76,6 +76,18 @@ export const styles = `
   .macro.over b { color: var(--warn); }
   .macro.good b { color: var(--ok); }
 
+  /* Keuzekaarten: elke optie is een <button>, dus dezelfde override als .tab
+     hierboven — anders maakt de algemene button-regel er iets vols en blauws van. */
+  .options { display: grid; gap: 8px; margin-top: 10px; }
+  .option {
+    width: 100%; margin: 0; text-align: left; padding: 10px 12px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 12px; font-weight: 400; cursor: pointer;
+  }
+  .option:hover, .option:focus-visible { border-color: var(--accent); }
+  .option strong { display: block; }
+  .option .macros { margin: 6px 0 4px; }
+
   .note { font-size: .78rem; color: var(--warn); margin-top: 8px; }
   /* Voor waarschuwende tekst midden in een regel, waar .note te veel marge geeft. */
   .warnish { color: var(--warn); }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTargets, planRecipe, rankPlans } from "../src/optimize/plan";
+import { buildTargets, planRecipe, planUniform, rankPlans, targetCost } from "../src/optimize/plan";
 import type { ResolvedRecipe } from "../src/ah/types";
 
 /** A 4-serving recipe: 500 g chicken, 300 g rice, 20 g oil, plus salt. */
@@ -136,6 +136,14 @@ describe("planRecipe", () => {
     expect(chicken.originalQuantity).toBeCloseTo(125); // 500 g / 4 servings
   });
 
+  it("flags a solver plan with scalingMode, distinct from a uniform one", () => {
+    const plan = planRecipe(matched, buildTargets({ protein: 60 }), { portions: 1 });
+    expect(plan.scalingMode).toBe("solver");
+
+    const uniform = planUniform(matched, recipe.total, buildTargets({ protein: 60 }), { portions: 1 });
+    expect(uniform.scalingMode).toBe("uniform");
+  });
+
   it("keeps a non-gram quantity in its own unit, not converted to grams", () => {
     const bananas: ResolvedRecipe = {
       ...recipe,
@@ -156,6 +164,21 @@ describe("planRecipe", () => {
     expect(bananen.originalQuantity).toBeCloseTo(1.5);
     expect(bananen.unit).toBeNull();
     expect(bananen.gramsSource).toBe("piece");
+  });
+});
+
+describe("targetCost", () => {
+  it("is zero for a perfect match", () => {
+    const targets = buildTargets({ protein: 60, kcal: 700 });
+    expect(targetCost({ protein: 60, kcal: 700 }, targets)).toBe(0);
+  });
+
+  it("grows with how far off the values are", () => {
+    const targets = buildTargets({ protein: 60, kcal: 700 });
+    const close = targetCost({ protein: 55, kcal: 680 }, targets);
+    const far = targetCost({ protein: 20, kcal: 300 }, targets);
+    expect(close).toBeGreaterThan(0);
+    expect(far).toBeGreaterThan(close);
   });
 });
 

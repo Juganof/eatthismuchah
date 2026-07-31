@@ -102,6 +102,10 @@ describe("planning without the network", () => {
       if (!meal.plan) continue;
       expect(meal.plan.perPortion.kcal, meal.slotName).toBeGreaterThan(0);
       expect(meal.plan.coverage, meal.slotName).toBe(1);
+      // Geen enkel ingredient is gematcht, dus is dit per definitie het uniforme
+      // pad — de UI gebruikt dit veld om "(geen voedingswaarde)" per regel te
+      // onderdrukken en in plaats daarvan één uitleg te tonen.
+      expect(meal.plan.scalingMode, meal.slotName).toBe("uniform");
     }
     expect(day.totals.kcal).toBeGreaterThan(0);
   });

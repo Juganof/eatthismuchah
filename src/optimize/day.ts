@@ -1,10 +1,10 @@
 import type { AhClient } from "../ah/client";
 import type { Nutrients, ResolvedRecipe } from "../ah/types";
 import type { SlotCandidate, Store } from "../db/queries";
-import { coverageOf, resolveRecipe } from "../nutrition/resolve";
+import { calibrateToTotal, coverageOf, resolveRecipe } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
-import { buildTargets, planRecipe, planUniform, type Plan } from "./plan";
+import { buildTargets, planRecipe, planUniform, targetCost, type Plan, type PlanOptions } from "./plan";
 
 /**
  * Stelt een hele dag samen: per eetmoment het recept dat, na herschalen, het
@@ -105,37 +105,80 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
  * het totaal — wat het geval is bij alles wat we van AH's eigen receptpagina
  * overnamen — dan schalen we het gerecht als geheel. Dat is minder fijnmazig maar
  * wel eerlijk, en oneindig veel beter dan rekenen met halve nullen.
+ *
+ * Is het recepttotaal van AH zelf afkomstig, dan wordt de per-ingredient
+ * voedingswaarde eerst geijkt op dat totaal (`calibrateToTotal`): de verhouding
+ * tussen ingredienten komt uit echte productdata, maar de som moet kloppen met
+ * het cijfer waarvan we zeker weten dat het klopt.
+ *
+ * `extraBounds` klemt elk ingredient dicht bij zijn oorspronkelijke hoeveelheid —
+ * gebruikt voor een "zoals het recept"-optie die niet toevallig dicht bij 1 mag
+ * uitkomen, maar dat ook echt gegarandeerd is.
  */
 function planFor(
   resolved: ResolvedRecipe,
   candidate: SlotCandidate,
   macroTargets: ReturnType<typeof buildTargets>,
+  extraBounds?: Pick<PlanOptions, "minScale" | "maxScale">,
 ): Plan | null {
   const coverage = coverageOf(resolved);
-  if (coverage >= 0.5) return planRecipe(resolved, macroTargets, { portions: 1 });
+  if (coverage >= 0.5) {
+    const source =
+      candidate.source === "ah" && candidate.nutrition.kcal
+        ? calibrateToTotal(resolved, candidate.nutrition)
+        : resolved;
+    return planRecipe(source, macroTargets, { portions: 1, ...extraBounds });
+  }
 
   const known = candidate.nutrition;
   if (!known?.kcal) return null;
-  return planUniform(resolved, known, macroTargets, { portions: 1 });
+  return planUniform(resolved, known, macroTargets, { portions: 1, ...extraBounds });
 }
 
-/** Plant één moment: haalt kandidaten op, herschaalt ze en kiest de beste. */
-async function planSlot(
+export interface PlanOption {
+  plan: Plan;
+  /** "origineel": het recept past al zo'n beetje; "herschaald": bijgesteld naar het doel. */
+  bucket: "origineel" | "herschaald";
+  /** Dezelfde score als scoreOf, zodat de volgorde te verantwoorden is. */
+  score: number;
+}
+
+/**
+ * Onder deze kost past een recept al ongeveer bij het doel zoals het geschreven
+ * staat. `buildTargets` geeft protein/kcal/carbs/fat samen een gewicht van zo'n
+ * 6, dus een gelijkmatige afwijking van 10% op elke macro kost ongeveer 0.06 —
+ * dat is de duimregel achter dit getal.
+ */
+const NEAR_FIT_COST = 0.06;
+
+interface CandidateLoopOptions {
+  diet?: string[];
+  excludedTerms?: string[];
+  excludeRecipeIds: string[];
+  kcalMode?: "target" | "max";
+  limit: number;
+  /** Zoekhints van het eetmoment, bv. ["kwark","havermout"]. */
+  slotTags?: string[];
+  /** Gezet bij herrollen: kies iets met vergelijkbare macro's als dit profiel. */
+  similarTo?: Nutrients;
+  /**
+   * Recepten die al dicht bij het doel zitten krijgen hun ingredienten vastgezet
+   * op 0.9-1.1x, zodat een "origineel"-optie ook echt nauwelijks herschaald is.
+   */
+  pinNearFit: boolean;
+}
+
+/**
+ * De ene kandidatenloop achter zowel het gewone plannen (`planSlot`, kiest de
+ * beste) als de keuzekaarten (`planSlotOptions`/`rerollSlotOptions`, houdt ze
+ * allemaal met hun score en emmer).
+ */
+async function planCandidates(
   store: Store,
   client: AhClient,
   targets: DailyTargets,
-  options: {
-    diet?: string[];
-    excludedTerms?: string[];
-    excludeRecipeIds: string[];
-    kcalMode?: "target" | "max";
-    limit: number;
-    /** Zoekhints van het eetmoment, bv. ["kwark","havermout"]. */
-    slotTags?: string[];
-    /** Gezet bij herrollen: kies iets met vergelijkbare macro's als dit profiel. */
-    similarTo?: Nutrients;
-  },
-): Promise<Plan | null> {
+  options: CandidateLoopOptions,
+): Promise<PlanOption[]> {
   const candidates = await store.shortlistForSlot({
     kcalPerPortion: targets.kcal,
     diet: options.diet,
@@ -143,10 +186,10 @@ async function planSlot(
     excludeRecipeIds: options.excludeRecipeIds,
     limit: options.limit,
   });
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return [];
 
   const macroTargets = buildTargets({ ...targets, kcalMode: options.kcalMode });
-  let best: { plan: Plan; score: number } | null = null;
+  const results: PlanOption[] = [];
 
   for (const candidate of candidates) {
     const recipe = await store.getRecipe(candidate.id);
@@ -155,7 +198,22 @@ async function planSlot(
     // Plannen mag nooit het netwerk op: er worden tientallen recepten
     // doorgerekend en elk ongematcht ingredient zou een AH-zoekopdracht kosten.
     const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
-    const plan = planFor(resolved, candidate, macroTargets);
+
+    // Kost van het recept zoals het geschreven staat, vóór herschalen — puur uit
+    // het gecachte recepttotaal, dus geen extra netwerk of solve nodig.
+    const servings = Math.max(candidate.servings, 1);
+    const perPortionRaw: Nutrients = {};
+    for (const [key, value] of Object.entries(candidate.nutrition)) {
+      perPortionRaw[key as keyof Nutrients] = value / servings;
+    }
+    const near = targetCost(perPortionRaw, macroTargets) <= NEAR_FIT_COST;
+
+    const plan = planFor(
+      resolved,
+      candidate,
+      macroTargets,
+      options.pinNearFit && near ? { minScale: 0.9, maxScale: 1.1 } : undefined,
+    );
     if (!plan) continue;
 
     let score = scoreOf(plan, candidate, options.slotTags ?? []);
@@ -163,10 +221,49 @@ async function planSlot(
     // het doel zelf: je vroeg om iets anders, niet om iets heel anders.
     if (options.similarTo) score += macroDistance(plan.perPortion, options.similarTo) * 1.5;
 
-    if (!best || score < best.score) best = { plan, score };
+    results.push({ plan, bucket: near ? "origineel" : "herschaald", score });
   }
 
+  return results;
+}
+
+/** Plant één moment: haalt kandidaten op, herschaalt ze en kiest de beste. */
+async function planSlot(
+  store: Store,
+  client: AhClient,
+  targets: DailyTargets,
+  options: Omit<CandidateLoopOptions, "pinNearFit">,
+): Promise<Plan | null> {
+  const results = await planCandidates(store, client, targets, { ...options, pinNearFit: false });
+  let best: PlanOption | null = null;
+  for (const result of results) if (!best || result.score < best.score) best = result;
   return best?.plan ?? null;
+}
+
+/**
+ * Verdeelt gescoorde kandidaten over de kaarten die de gebruiker te zien krijgt:
+ * tot 2 die al dicht bij het doel zitten, de rest bijgesteld — en is een van
+ * beide emmers te klein, dan vult de andere aan in plaats van minder kaarten
+ * te tonen dan gevraagd.
+ */
+function pickOptions(all: PlanOption[], count: number): PlanOption[] {
+  const seen = new Set<string>();
+  const unique = all.filter((option) => {
+    if (seen.has(option.plan.recipeId)) return false;
+    seen.add(option.plan.recipeId);
+    return true;
+  });
+
+  const origineel = unique.filter((o) => o.bucket === "origineel").sort((a, b) => a.score - b.score);
+  const herschaald = unique.filter((o) => o.bucket === "herschaald").sort((a, b) => a.score - b.score);
+
+  const picked = origineel.slice(0, Math.min(2, count));
+  const rest = [...origineel.slice(picked.length), ...herschaald].sort((a, b) => a.score - b.score);
+  for (const option of rest) {
+    if (picked.length >= count) break;
+    picked.push(option);
+  }
+  return picked;
 }
 
 /** Doel min behaald, per macro. */
@@ -302,4 +399,28 @@ export async function rerollSlot(
     slotTags: options.slotTags,
     similarTo: options.similarTo,
   });
+}
+
+/**
+ * Zelfde kandidaten als `rerollSlot`, maar in plaats van er meteen de beste uit
+ * te kiezen krijg je er een handvol terug om uit te kiezen: zonder `similarTo`
+ * is dit "vul dit moment", mét is het "ander recept" — beide vullen straks een
+ * leeg of een bestaand moment pas als de gebruiker er een aantikt.
+ */
+export async function rerollSlotOptions(
+  store: Store,
+  client: AhClient,
+  options: RerollOptions & { count?: number },
+): Promise<PlanOption[]> {
+  const all = await planCandidates(store, client, options.targets, {
+    diet: options.diet,
+    excludedTerms: options.excludedTerms,
+    excludeRecipeIds: options.excludeRecipeIds,
+    kcalMode: options.kcalMode,
+    limit: options.candidates ?? 30,
+    slotTags: options.slotTags,
+    similarTo: options.similarTo,
+    pinNearFit: true,
+  });
+  return pickOptions(all, options.count ?? 4);
 }

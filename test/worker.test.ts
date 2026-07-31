@@ -29,7 +29,16 @@ describe("Worker routes", () => {
     for (const tab of ["panel-profiel", "panel-momenten", "panel-dag", "panel-week"]) {
       expect(html, `tab ${tab} ontbreekt`).toContain(tab);
     }
-    for (const route of ["/api/profile", "/api/slots", "/api/day/generate", "/api/day/reroll", "/api/shopping"]) {
+    for (const route of [
+      "/api/profile",
+      "/api/slots",
+      "/api/day/generate",
+      "/api/day/slot",
+      "/api/day/reroll",
+      "/api/shopping",
+      "/api/enrich",
+      "/api/products/search",
+    ]) {
       expect(html, `${route} wordt niet aangeroepen`).toContain(route);
     }
   });

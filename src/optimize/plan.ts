@@ -55,6 +55,12 @@ export interface Plan {
   cost: number;
   /** Share of recipe weight with known nutrition. */
   coverage: number;
+  /**
+   * Whether this plan came from the per-ingredient solver (real per-ingredient
+   * nutrition was known) or from scaling the whole recipe by one factor (only the
+   * recipe-level total was known, e.g. AH's own nutrition-per-serving figure).
+   */
+  scalingMode: "solver" | "uniform";
 }
 
 /**
@@ -66,7 +72,14 @@ const SEASONING = /peper|zout|kruid|specerij|kaneel|nootmuskaat|paprikapoeder|ko
 
 function boundsFor(name: string, opts: PlanOptions): { min: number; max: number } {
   if (opts.locked?.some((l) => name.includes(l.toLowerCase()))) return { min: 1, max: 1 };
-  if (SEASONING.test(name)) return { min: 0.75, max: 1.5 };
+  if (SEASONING.test(name)) {
+    // Intersect rather than override: a caller pinning everything close to 1 (an
+    // "as written" option) must still pin the seasoning, not fall back to its own
+    // wider default range.
+    const min = Math.max(0.75, opts.minScale ?? 0.25);
+    const max = Math.min(1.5, opts.maxScale ?? 3);
+    return { min: Math.min(min, max), max };
+  }
   return { min: opts.minScale ?? 0.25, max: opts.maxScale ?? 3 };
 }
 
@@ -128,6 +141,7 @@ export function planRecipe(
     perPortion,
     cost: result.cost,
     coverage: coverageOfPlan(ingredients),
+    scalingMode: "solver",
   };
 }
 
@@ -196,9 +210,10 @@ export function planUniform(
     ingredients,
     totals,
     perPortion,
-    cost: costOf(perPortion, targets),
+    cost: targetCost(perPortion, targets),
     // De totalen komen van AH zelf, dus hier valt niets te schatten.
     coverage: 1,
+    scalingMode: "uniform",
   };
 }
 
@@ -235,8 +250,12 @@ function bestUniformScale(
   return Math.min(bounds.max, Math.max(bounds.min, scale));
 }
 
-/** Dezelfde kostenmaat als de solver, zodat plannen onderling vergelijkbaar zijn. */
-function costOf(perPortion: Nutrients, targets: MacroTarget[]): number {
+/**
+ * Dezelfde kostenmaat als de solver, zodat plannen onderling vergelijkbaar zijn.
+ * Ook bruikbaar vóór het herschalen: hoe goed past dit recept al zoals het
+ * geschreven staat, zonder dat er iets aan gerekend is.
+ */
+export function targetCost(perPortion: Nutrients, targets: MacroTarget[]): number {
   let cost = 0;
   for (const target of targets) {
     const value = perPortion[target.key] ?? 0;

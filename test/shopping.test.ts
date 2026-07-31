@@ -27,6 +27,7 @@ const plan = (ingredients: PlannedIngredient[]): Plan => ({
   totals: {},
   cost: 0,
   coverage: 1,
+  scalingMode: "solver",
 });
 
 describe("buildShoppingList", () => {

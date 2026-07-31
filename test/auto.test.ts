@@ -29,13 +29,16 @@ const recipePage = (id: string, keywords: string) =>
   })}</script></html>`;
 
 /** Doet alsof ah.nl antwoordt: zoekpagina's en receptpagina's, geen netwerk. */
-function stubAh(options: { keywords?: string; blockDetails?: boolean } = {}) {
+function stubAh(options: { keywords?: string; blockDetails?: boolean; blockProducts?: boolean } = {}) {
   const calls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       calls.push(url);
+      if (url.includes("/mobile-auth/")) {
+        return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
+      }
       if (url.includes("/recepten-zoeken") || url.includes("/service/search/recipes")) {
         return new Response(SEARCH_PAGE(["R-R101", "R-R102"]), { status: 200 });
       }
@@ -43,6 +46,23 @@ function stubAh(options: { keywords?: string; blockDetails?: boolean } = {}) {
         if (options.blockDetails) return new Response("Access Denied", { status: 403 });
         const id = url.match(/recept\/(R-R\d+)/)?.[1] ?? "R-R1";
         return new Response(recipePage(id, options.keywords ?? "ontbijt"), { status: 200 });
+      }
+      if (url.includes("/product/search/")) {
+        if (options.blockProducts) return new Response("Access Denied", { status: 403 });
+        return new Response(JSON.stringify({ products: [{ webshopId: 1, title: "AH Havermout" }] }), { status: 200 });
+      }
+      if (url.includes("/product/detail/")) {
+        return new Response(
+          JSON.stringify({
+            webshopId: 1,
+            title: "AH Havermout",
+            nutritionalInformation: [
+              { name: "Energie (kcal)", value: "375 kcal" },
+              { name: "Eiwitten", value: "13 g" },
+            ],
+          }),
+          { status: 200 },
+        );
       }
       return new Response("{}", { status: 200 });
     }),
@@ -124,10 +144,13 @@ describe("runAutoIngest", () => {
     stubAh({ keywords: "ontbijt, lunch, tussendoortje, hoofdgerecht" });
     const env = envFor();
     const store = new Store(env.DB);
+    // Los van enrichment: dat heeft zijn eigen tests hieronder, en zou anders
+    // een van deze vier rondes inpikken.
+    const config = { ...fastConfig, enrichEvery: 1000 };
 
     const seen: string[] = [];
     for (let i = 0; i < 4; i++) {
-      const result = await runAutoIngest(env, fastConfig);
+      const result = await runAutoIngest(env, config);
       seen.push((result.detail ?? "").split(":")[0]!);
       // Ruim de lege recepten op, anders kiest de volgende ronde voor repareren.
       await store.putSlots([]);
@@ -199,6 +222,66 @@ describe("runAutoIngest", () => {
 
     expect(second.ran).toBe(false);
     expect(second.reason).toContain("dagbudget");
+  });
+});
+
+describe("enrichment tier", () => {
+  /** Een recept met ingredienten die nooit aan een product zijn gekoppeld. */
+  async function seedUnmatched(store: Store) {
+    await store.putRecipe({
+      id: "R-R1",
+      title: "Havermout met kwark",
+      url: "https://www.ah.nl/allerhande/recept/R-R1",
+      servings: 1,
+      imageUrl: null,
+      ingredients: [{ name: "havermout", quantity: 80, unit: "g" }],
+    });
+    await store.putNutrition("R-R1", { kcal: 300, protein: 13, carbs: 58, fat: 7, fiber: 10 }, 1, "ah");
+  }
+
+  it("takes its turn when there are koppelingen open and no empty recipes", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    await seedUnmatched(store);
+
+    const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 1 });
+
+    expect(result.mode).toBe("enrich");
+    expect(result.enriched).toBe(1);
+    expect(await store.getMatch("havermout")).toBeDefined();
+  });
+
+  it("still lets empty recipes win, even on enrichment's turn", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    await seedUnmatched(store);
+    // Een titel zonder ingredienten: dat moet voorrang houden op koppelingen.
+    await store.putRecipe({
+      id: "R-R999",
+      title: "Leeg recept",
+      url: "https://www.ah.nl/allerhande/recept/R-R999",
+      servings: 4,
+      imageUrl: null,
+      ingredients: [],
+    });
+
+    const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 1 });
+    expect(result.mode).toBe("repair");
+  });
+
+  it("cools down when AH blocks a product search during enrichment", async () => {
+    stubAh({ blockProducts: true });
+    const env = envFor();
+    const store = new Store(env.DB);
+    await seedUnmatched(store);
+
+    const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 1 });
+
+    expect(result.mode).toBe("enrich");
+    expect(result.blocked).toBeGreaterThan(0);
+    expect(result.cooldownUntil).toBeGreaterThan(Date.now());
   });
 });
 

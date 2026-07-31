@@ -345,3 +345,42 @@ describe("matchMap", () => {
     expect(await store.matchMap([])).toEqual({});
   });
 });
+
+describe("ingredientNamesWithoutMatch", () => {
+  it("orders by how many recipes use the name, most first", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ id: "R-R1", ingredients: [{ name: "kwark", quantity: 150, unit: "g" }] }));
+    await store.putRecipe(recipe({ id: "R-R2", ingredients: [{ name: "kwark", quantity: 200, unit: "g" }] }));
+    await store.putRecipe(recipe({ id: "R-R3", ingredients: [{ name: "banaan", quantity: 1, unit: null }] }));
+
+    const names = await store.ingredientNamesWithoutMatch(10);
+    expect(names[0]).toEqual({ name: "kwark", uses: 2 });
+    expect(names[1]).toEqual({ name: "banaan", uses: 1 });
+    expect(await store.countIngredientNamesWithoutMatch()).toBe(2);
+  });
+
+  it("skips a name that already has a remembered match, even a negative one", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ ingredients: [{ name: "water", quantity: 1, unit: "l" }] }));
+    // Een bevestigd "geen product gevonden" telt als opgezocht, niet als open.
+    await store.putMatch("water", null, 0);
+
+    expect(await store.ingredientNamesWithoutMatch(10)).toEqual([]);
+    expect(await store.countIngredientNamesWithoutMatch()).toBe(0);
+  });
+
+  it("re-includes a name once its cached match has expired", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ ingredients: [{ name: "kwark", quantity: 150, unit: "g" }] }));
+    await store.putMatch("kwark", "wi-kwark", 0.9);
+    expect(await store.ingredientNamesWithoutMatch(10)).toEqual([]);
+
+    // Simuleer een match die buiten de TTL van 30 dagen is gevallen.
+    const longAgo = Date.now() - 31 * 24 * 60 * 60 * 1000;
+    await db!.prepare("UPDATE ingredient_matches SET matched_at = ? WHERE ingredient_name = ?")
+      .bind(longAgo, "kwark")
+      .run();
+
+    expect(await store.ingredientNamesWithoutMatch(10)).toEqual([{ name: "kwark", uses: 1 }]);
+  });
+});

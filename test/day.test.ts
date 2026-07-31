@@ -3,7 +3,7 @@ import { AhClient } from "../src/ah/client";
 import { Store } from "../src/db/queries";
 import { DEFAULT_SLOTS, type MealSlot } from "../src/nutrition/split";
 import type { DailyTargets } from "../src/nutrition/targets";
-import { generateDay, macroDistance, rerollSlot } from "../src/optimize/day";
+import { generateDay, macroDistance, rerollSlot, rerollSlotOptions } from "../src/optimize/day";
 import { createTestDb, type TestDb } from "./helpers/d1";
 import { FOODS, seedRecipes } from "./helpers/seed";
 
@@ -226,6 +226,61 @@ describe("rerollSlot", () => {
     });
 
     expect(replacement).toBeNull();
+  });
+});
+
+describe("rerollSlotOptions", () => {
+  // Exact het per-portie profiel van R-R3 ("Kip met rijst en broccoli"), zodat
+  // dat recept zonder herschalen al bij het doel past.
+  const closeToR3: DailyTargets = { kcal: 598.6, protein: 58.3, carbs: 78.2, fat: 4.5, fiber: 7.26 };
+
+  it("returns at most `count` options, each with a distinct recipe and a bucket", async () => {
+    const store = await storeWithLibrary();
+    const options = await rerollSlotOptions(store, client, {
+      targets: closeToR3,
+      excludeRecipeIds: [],
+      count: 3,
+    });
+
+    expect(options.length).toBeLessThanOrEqual(3);
+    expect(options.length).toBeGreaterThan(0);
+    const ids = options.map((o) => o.plan.recipeId);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const option of options) {
+      expect(["origineel", "herschaald"]).toContain(option.bucket);
+    }
+  });
+
+  it("buckets a recipe that already matches as \"origineel\", pinned close to 1x", async () => {
+    const store = await storeWithLibrary();
+    const options = await rerollSlotOptions(store, client, {
+      targets: closeToR3,
+      excludeRecipeIds: [],
+      count: 4,
+    });
+
+    const original = options.find((o) => o.plan.recipeId === "R-R3");
+    expect(original?.bucket).toBe("origineel");
+    for (const ingredient of original!.plan.ingredients) {
+      expect(ingredient.scale).toBeGreaterThanOrEqual(0.9);
+      expect(ingredient.scale).toBeLessThanOrEqual(1.1);
+    }
+  });
+
+  it("returns only \"herschaald\" options when nothing is naturally close to the target", async () => {
+    const store = await storeWithLibrary();
+    // kcal blijft binnen ieders bandbreedte (zodat de shortlist niet leegloopt),
+    // maar de verhouding — vrijwel geen koolhydraten, extreem veel eiwit — komt
+    // met geen van de vijf recepten in de buurt.
+    const farOff: DailyTargets = { kcal: 500, protein: 150, carbs: 10, fat: 5, fiber: 20 };
+    const options = await rerollSlotOptions(store, client, {
+      targets: farOff,
+      excludeRecipeIds: [],
+      count: 4,
+    });
+
+    expect(options.length).toBeGreaterThan(0);
+    expect(options.every((o) => o.bucket === "herschaald")).toBe(true);
   });
 });
 

@@ -2,6 +2,7 @@ import { Store } from "../db/queries";
 import {
   MOMENTS,
   MOMENT_QUERIES,
+  enrichIngredientMatches,
   ingestQueries,
   repairEmptyRecipes,
   type ScrapeEnv,
@@ -28,6 +29,7 @@ import {
 const CURSOR = "auto:cursor";
 const COOLDOWN_UNTIL = "auto:cooldown_until";
 const BLOCK_STREAK = "auto:block_streak";
+const ENRICH_TURN = "auto:enrich_turn";
 
 export interface AutoConfig {
   /** Recepten per ronde. Klein houden: een ronde moet binnen de worker passen. */
@@ -47,6 +49,15 @@ export interface AutoConfig {
   maxCooldownMs: number;
   /** Wachttijd voor de eerste herkansing binnen een ronde; verdubbelt daarna. */
   backoffMs: number;
+  /** Ingredientnamen per enrichment-ronde. */
+  enrichBatch: number;
+  /**
+   * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
+   * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
+   * zou enrichment nooit laten draaien, want de eetmoment-rotatie heeft altijd
+   * werk; een vast aandeel laat de dekking wel geleidelijk verbeteren.
+   */
+  enrichEvery: number;
 }
 
 export const DEFAULT_AUTO_CONFIG: AutoConfig = {
@@ -56,16 +67,19 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   cooldownMs: 30 * 60 * 1000,
   maxCooldownMs: 4 * 60 * 60 * 1000,
   backoffMs: 1500,
+  enrichBatch: 6,
+  enrichEvery: 3,
 };
 
 export interface AutoResult {
   ran: boolean;
   /** Waarom er niets gebeurde, als er niets gebeurde. */
   reason?: string;
-  mode?: "repair" | "moment";
+  mode?: "repair" | "moment" | "enrich";
   detail?: string;
   added?: number;
   repaired?: number;
+  enriched?: number;
   blocked?: number;
   /** Tot wanneer we ons gedeisd houden, als AH ons net geblokkeerd heeft. */
   cooldownUntil?: number;
@@ -85,6 +99,8 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     cooldownMs: read("AUTO_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.cooldownMs),
     maxCooldownMs: read("AUTO_MAX_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.maxCooldownMs),
     backoffMs: read("AUTO_BACKOFF_MS", DEFAULT_AUTO_CONFIG.backoffMs),
+    enrichBatch: read("AUTO_ENRICH_BATCH", DEFAULT_AUTO_CONFIG.enrichBatch),
+    enrichEvery: read("AUTO_ENRICH_EVERY", DEFAULT_AUTO_CONFIG.enrichEvery),
   };
 }
 
@@ -131,6 +147,30 @@ export async function runAutoIngest(
       blocked: result.blocked,
       ...(cooldownUntil ? { cooldownUntil } : {}),
     };
+  }
+
+  // Eén op de `enrichEvery` niet-repareer-rondes gaat naar ingredient-koppelingen
+  // in plaats van nieuwe recepten — zie EnrichConfig hierboven voor waarom dit
+  // een vast aandeel is en geen vaste, nooit-bereikte laatste prioriteit.
+  const enrichTurn = Number((await store.getState(ENRICH_TURN)) ?? 0);
+  await store.setState(ENRICH_TURN, String((enrichTurn + 1) % config.enrichEvery));
+
+  if (enrichTurn === 0) {
+    const openNames = await store.countIngredientNamesWithoutMatch();
+    if (openNames > 0) {
+      const runId = await store.startRun("enrich", `${openNames} koppelingen open`);
+      const result = await enrichIngredientMatches(env, config.enrichBatch, clientOptions);
+      await store.finishRun(runId, { repaired: result.matched, blocked: result.blocked, errors: result.errors });
+      const cooldownUntil = await applyCooldown(store, result.blocked, config, now);
+      return {
+        ran: true,
+        mode: "enrich",
+        detail: `${openNames} koppelingen open`,
+        enriched: result.matched,
+        blocked: result.blocked,
+        ...(cooldownUntil ? { cooldownUntil } : {}),
+      };
+    }
   }
 
   // Rouleren over de eetmomenten, en binnen een moment over de zoektermen, zodat
@@ -195,6 +235,7 @@ export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AU
     vandaag: today,
     dagbudget: config.dailyMax,
     openLegeRecepten: await store.countWithoutIngredients(),
+    openKoppelingen: await store.countIngredientNamesWithoutMatch(),
     afkoelenTot: cooldownUntil > Date.now() ? cooldownUntil : null,
     blokkadesOpEenRij: Number((await store.getState(BLOCK_STREAK)) ?? 0),
     volgende: MOMENTS[Number((await store.getState(CURSOR)) ?? 0) % MOMENTS.length],

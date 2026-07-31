@@ -18,6 +18,8 @@ export interface RecipeSummary {
   nutrition: Nutrients;
   coverage: number;
   tags: string[];
+  /** Waar het opgeslagen recepttotaal vandaan komt: AH's eigen opgave, of zelf opgeteld uit gematchte producten. */
+  source: "ah" | "products";
 }
 
 export class Store {
@@ -338,6 +340,41 @@ export class Store {
   }
 
   /**
+   * Ingredientnamen die nog nooit bij een AH-product zijn opgezocht, de vaakst
+   * voorkomende eerst — één opzoekactie voor "kwark" verhelpt in één keer elk
+   * recept met kwark erin. Dit is de motor achter `enrichIngredientMatches`
+   * (`src/ingest/pipeline.ts`): recepten met AH's eigen voedingswaarde slaan het
+   * opzoeken van hun ingredienten over tijdens het scrapen (zie `computeNutrition`),
+   * dus zonder dit loopt `ingredient_matches` voor bijna geen enkel recept vol.
+   */
+  private ingredientNamesWithoutMatchQuery(): string {
+    return `SELECT json_extract(ing.value, '$.name') AS name, COUNT(*) AS uses
+       FROM recipes r, json_each(r.ingredients) AS ing
+       WHERE json_extract(ing.value, '$.name') IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM ingredient_matches m
+           WHERE m.ingredient_name = json_extract(ing.value, '$.name') AND m.matched_at > ?
+         )
+       GROUP BY name`;
+  }
+
+  async ingredientNamesWithoutMatch(limit: number): Promise<{ name: string; uses: number }[]> {
+    const { results } = await this.db
+      .prepare(`${this.ingredientNamesWithoutMatchQuery()} ORDER BY uses DESC, name ASC LIMIT ?`)
+      .bind(Date.now() - MATCH_TTL_MS, limit)
+      .all<{ name: string; uses: number }>();
+    return results ?? [];
+  }
+
+  async countIngredientNamesWithoutMatch(): Promise<number> {
+    const row = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM (${this.ingredientNamesWithoutMatchQuery()})`)
+      .bind(Date.now() - MATCH_TTL_MS)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  /**
    * Shortlists cached recipes for a target. Ordering by protein density rather
    * than raw protein keeps 3000 kcal party dishes out of a 700 kcal dinner slot.
    */
@@ -345,7 +382,7 @@ export class Store {
     const { results } = await this.db
       .prepare(
         `SELECT r.id, r.title, r.url, r.servings, r.image_url, r.tags,
-                n.kcal, n.protein, n.carbs, n.fat, n.fiber, n.coverage
+                n.kcal, n.protein, n.carbs, n.fat, n.fiber, n.coverage, n.source
          FROM recipe_nutrition n
          JOIN recipes r ON r.id = n.recipe_id
          WHERE n.coverage >= ? AND n.kcal > 0
@@ -409,7 +446,7 @@ export class Store {
     const { results } = await this.db
       .prepare(
         `SELECT r.id, r.title, r.url, r.servings, r.image_url, r.tags,
-                n.kcal, n.protein, n.carbs, n.fat, n.fiber, n.coverage,
+                n.kcal, n.protein, n.carbs, n.fat, n.fiber, n.coverage, n.source,
                 COALESCE(p.status, '') AS pref_status,
                 (SELECT COUNT(*) FROM saved_day_meals m
                    JOIN saved_days d ON d.id = m.day_id
@@ -1045,6 +1082,7 @@ interface ShortlistRow {
   fat: number;
   fiber: number;
   coverage: number;
+  source: string;
 }
 
 // ----------------------------------------------------------------- helpers
@@ -1065,6 +1103,7 @@ function toSummary(r: ShortlistRow): RecipeSummary {
       fat: r.fat,
       fiber: r.fiber,
     },
+    source: r.source === "ah" ? "ah" : "products",
   };
 }
 

@@ -8,13 +8,14 @@ import { autoStatus, configFrom, runAutoIngest } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
   computeNutrition,
+  enrichIngredientMatches,
   ingestQueries,
   repairEmptyRecipes,
   scrapeClient,
 } from "./ingest/pipeline";
 import { splitTargets, type MealSlot } from "./nutrition/split";
 import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
-import { blankDay, generateDay, rerollSlot, type DayPlan } from "./optimize/day";
+import { blankDay, generateDay, rerollSlotOptions, type DayPlan } from "./optimize/day";
 import { buildTargets, planRecipe, rankPlans, type Plan } from "./optimize/plan";
 import { buildShoppingList, type ShoppingInput } from "./plan/shopping";
 import { renderPage } from "./ui/page";
@@ -29,6 +30,9 @@ export interface Env {
   AUTO_DAILY_MAX?: string;
   AUTO_MIN_INTERVAL_MS?: string;
   AUTO_COOLDOWN_MS?: string;
+  AUTO_MAX_COOLDOWN_MS?: string;
+  AUTO_ENRICH_BATCH?: string;
+  AUTO_ENRICH_EVERY?: string;
   /** Index signature zodat configFrom de bovenstaande vars kan uitlezen. */
   [key: string]: unknown;
 }
@@ -204,6 +208,26 @@ app.post("/api/repair", async (c) => {
 });
 
 /**
+ * Vult ingredient -> product koppelingen aan voor recepten die AH's eigen
+ * voedingswaarde gebruikten en daardoor nooit een productzoekopdracht deden —
+ * zie enrichIngredientMatches in src/ingest/pipeline.ts.
+ */
+app.post("/api/enrich", async (c) => {
+  const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
+  const store = storeFor(c.env);
+  const result = await enrichIngredientMatches(c.env, body.limit ?? 15);
+  if (result.examined === 0) {
+    return c.json({ ...result, remaining: 0, message: "alle ingredienten zijn al opgezocht" });
+  }
+
+  return c.json({
+    ...result,
+    remaining: await store.countIngredientNamesWithoutMatch(),
+    errors: result.errors.slice(0, 10),
+  });
+});
+
+/**
  * De stand van zaken van het automatisch bijvullen: wat er vandaag binnenkwam,
  * of AH ons afknijpt, en wat er nog open staat.
  */
@@ -317,6 +341,18 @@ app.post("/api/generate", async (c) => {
   }
 
   return c.json({ plans: rankPlans(plans).slice(0, body.results ?? 5) });
+});
+
+/**
+ * Live productzoekopdracht voor het handmatig corrigeren van een koppeling —
+ * een bewuste, incidentele actie van de gebruiker, dus geen bezwaar tegen het
+ * netwerk op, in tegenstelling tot het plannen zelf.
+ */
+app.get("/api/products/search", async (c) => {
+  const q = c.req.query("q");
+  if (!q) return c.json({ error: "missing ?q" }, 400);
+  const products = await clientFor(c.env, c.executionCtx).searchProducts(q, Number(c.req.query("size") ?? 8));
+  return c.json({ products });
 });
 
 /** Manual correction when the automatic ingredient→product match is wrong. */
@@ -467,6 +503,8 @@ app.get("/api/day/blank", async (c) => {
   return c.json(blankDay(c.req.query("date") ?? today(), await store.getSlots(), targets));
 });
 
+const optionCountOf = (body: RerollRequest) => Math.min(Math.max(body.optionCount ?? 1, 1), 6);
+
 /** Vult één eetmoment in. Zelfde werk als herrollen, zonder iets te vervangen. */
 app.post("/api/day/slot", async (c) => {
   const body = await c.req.json<RerollRequest>().catch(() => ({}) as RerollRequest);
@@ -474,7 +512,7 @@ app.post("/api/day/slot", async (c) => {
 
   const store = storeFor(c.env);
   const profile = await store.getProfile();
-  const plan = await rerollSlot(store, clientFor(c.env, c.executionCtx), {
+  const options = await rerollSlotOptions(store, clientFor(c.env, c.executionCtx), {
     targets: body.targets,
     excludeRecipeIds: body.excludeRecipeIds ?? [],
     slotTags: body.slotTags,
@@ -482,15 +520,16 @@ app.post("/api/day/slot", async (c) => {
     excludedTerms: await store.getExclusions(),
     kcalMode: body.kcalMode,
     candidates: body.candidates,
+    count: optionCountOf(body),
   });
 
-  if (!plan) {
+  if (options.length === 0) {
     return c.json(
-      { error: "geen passend recept in de database — laat de scraper eerst meer ophalen", plan: null },
+      { error: "geen passend recept in de database — laat de scraper eerst meer ophalen", plan: null, options: [] },
       409,
     );
   }
-  return c.json({ plan });
+  return c.json({ plan: options[0]!.plan, options });
 });
 
 /** Ander recept voor één eetmoment, met vergelijkbare macro's. */
@@ -502,7 +541,7 @@ app.post("/api/day/reroll", async (c) => {
   const client = clientFor(c.env, c.executionCtx);
   const profile = await store.getProfile();
 
-  const plan = await rerollSlot(store, client, {
+  const options = await rerollSlotOptions(store, client, {
     targets: body.targets,
     excludeRecipeIds: body.excludeRecipeIds ?? [],
     similarTo: body.similarTo,
@@ -511,12 +550,13 @@ app.post("/api/day/reroll", async (c) => {
     excludedTerms: await store.getExclusions(),
     kcalMode: body.kcalMode,
     candidates: body.candidates,
+    count: optionCountOf(body),
   });
 
-  if (!plan) {
-    return c.json({ error: "geen ander passend recept gevonden — scrape er meer", plan: null }, 409);
+  if (options.length === 0) {
+    return c.json({ error: "geen ander passend recept gevonden — scrape er meer", plan: null, options: [] }, 409);
   }
-  return c.json({ plan });
+  return c.json({ plan: options[0]!.plan, options });
 });
 
 // -------------------------------------------------------- opgeslagen dagen
@@ -690,6 +730,8 @@ interface RerollRequest {
   slotTags?: string[];
   kcalMode?: "target" | "max";
   candidates?: number;
+  /** Hoeveel keuzekaarten terug moeten komen; 1 (het oude gedrag) als niet gezet. */
+  optionCount?: number;
 }
 
 // ----------------------------------------------------------------- helpers
