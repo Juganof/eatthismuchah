@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { AhClient } from "../src/ah/client";
 
-describe("live AH integration", () => {
+// Hits ah.nl for real, so it stays off by default: a plain `npm test` must pass
+// offline. Run it deliberately with LIVE_AH=1 npm test when the parsers look stale.
+describe.skipIf(!process.env.LIVE_AH)("live AH integration", () => {
   const client = new AhClient("Appie/8.22.3 Model/phone Android/13-M");
 
   it(

@@ -1,27 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
+import { createTestDb } from "./helpers/d1";
 
-function emptyDb(): D1Database {
-  const statement = {
-    bind: () => statement,
-    first: async () => ({ n: 0 }),
-    all: async () => ({ results: [], success: true, meta: {} }),
-    run: async () => ({ results: [], success: true, meta: {} }),
-  };
-  return {
-    prepare: () => statement,
-  } as unknown as D1Database;
-}
+const db = createTestDb();
+afterAll(() => db.close());
 
 const env: Env = {
-  DB: emptyDb(),
+  DB: db,
   AH_USER_AGENT: "test",
   INGEST_QUERIES: "kip",
   INGEST_LIMIT: "1",
 };
 
+const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+
 const fetchWorker = (path: string, init?: RequestInit) =>
-  worker.fetch(new Request(`https://worker.test${path}`, init), env, {} as ExecutionContext);
+  worker.fetch(new Request(`https://worker.test${path}`, init), env, ctx);
 
 describe("Worker routes", () => {
   it("renders the planner UI", async () => {
