@@ -208,6 +208,9 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `POST /api/reparse` | Recepten terughalen uit het ruwe archief |
 | `POST /api/repair` | Lege recepten alsnog ophalen (na een geblokkeerde scrape) |
 | `POST /api/purge` | Onbruikbare recepten opruimen (`graceMs` optioneel) |
+| `GET /api/logs` | De applicatielog; `?format=text` geeft platte tekst, `?level=error` filtert |
+| `POST /api/logs/clear` | Log leegmaken |
+| `POST /api/wipe` | Alles wissen (`{"scope":"scrape"}` of `{"scope":"alles"}`) |
 | `GET /api/auto/status` | Stand van het automatisch bijvullen |
 | `POST /api/auto/run` | Nu een ronde draaien in plaats van wachten op de cron |
 | `GET /api/browse/recipes` | Alle recepten met labels, voeding en dekking |
@@ -222,6 +225,22 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 curl -X POST https://<jouw-worker>.workers.dev/api/day/generate \
   -H 'Content-Type: application/json' -d '{"date":"2026-08-01"}'
 ```
+
+## Logs en opnieuw beginnen
+
+Onder **Database → Automatisch bijvullen → Logs** staat een echte applicatielog:
+elk verzoek aan ah.nl met zijn statuscode, welke ingrediënten aan welk product
+gekoppeld werden, wat er opgeruimd is, waarom een eetmoment leeg bleef, en elke fout.
+Te filteren op niveau, en met **Kopieer log** heb je alles als platte tekst op je
+klembord — precies de vorm om door te sturen als je wilt laten uitzoeken wat de app
+deed. De log blijft begrensd op de laatste 2000 regels (`AUTO_LOG_KEEP`); ouder gaat
+elke automatische ronde weg.
+
+**Alles wissen** staat onder Beheer & database, in twee smaken. De gewone knop gooit
+de scrape-data weg (recepten, producten, koppelingen, voedingswaarde, het archief, de
+rondes en de log) en laat je profiel, eetmomenten en opgeslagen dagen staan — die zijn
+van jou en nergens anders vandaan te halen. De tweede knop wist ook die. Beide vragen
+eerst een bevestiging en daarna het woord `WISSEN`, want er is geen weg terug.
 
 ## Belangrijk om te weten
 

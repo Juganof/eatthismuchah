@@ -22,6 +22,20 @@ export interface RecipeSummary {
   source: "ah" | "products";
 }
 
+export type LogLevel = "info" | "warn" | "error";
+
+export interface LogRow {
+  id: number;
+  at: number;
+  level: LogLevel;
+  source: string;
+  message: string;
+  detail: string | null;
+}
+
+/** Hoe ver `Store.wipe` gaat; zie daar voor waarom dit onderscheid bestaat. */
+export type WipeScope = "scrape" | "alles";
+
 export class Store {
   constructor(private readonly db: D1Database) {}
 
@@ -848,6 +862,121 @@ export class Store {
       .bind(limit)
       .all<Record<string, unknown>>();
     return results ?? [];
+  }
+
+  // ------------------------------------------------------------------- logs
+
+  /**
+   * Eén regel de log in. Gooit nooit: een log die de aanroeper laat omvallen is
+   * erger dan een ontbrekende regel, en dit draait midden in het scrapen. Om
+   * dezelfde reden wordt er niet gewacht op de vorige regel — de aanroeper mag
+   * dit zonder `await` doen.
+   */
+  async log(
+    level: LogLevel,
+    source: string,
+    message: string,
+    detail?: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.db
+        .prepare("INSERT INTO app_logs (at, level, source, message, detail) VALUES (?, ?, ?, ?, ?)")
+        .bind(
+          Date.now(),
+          level,
+          source,
+          message.slice(0, 500),
+          detail ? JSON.stringify(detail).slice(0, 2000) : null,
+        )
+        .run();
+    } catch {
+      // Een log die niet weggeschreven kan worden mag niets breken.
+    }
+  }
+
+  async recentLogs(limit: number, level?: LogLevel): Promise<LogRow[]> {
+    const where = level ? "WHERE level = ?" : "";
+    const params: unknown[] = level ? [level, limit] : [limit];
+    const { results } = await this.db
+      .prepare(`SELECT id, at, level, source, message, detail FROM app_logs ${where}
+                ORDER BY at DESC, id DESC LIMIT ?`)
+      .bind(...params)
+      .all<LogRow>();
+    return results ?? [];
+  }
+
+  async countLogs(): Promise<number> {
+    const row = await this.db.prepare("SELECT COUNT(*) AS n FROM app_logs").first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  /** Houdt de log begrensd: alleen de nieuwste `keep` regels blijven staan. */
+  async trimLogs(keep: number): Promise<void> {
+    try {
+      await this.db
+        .prepare(
+          `DELETE FROM app_logs WHERE id NOT IN (
+             SELECT id FROM app_logs ORDER BY id DESC LIMIT ?
+           )`,
+        )
+        .bind(keep)
+        .run();
+    } catch {
+      // zie log(): opruimen mag nooit een ronde laten mislukken
+    }
+  }
+
+  async clearLogs(): Promise<void> {
+    await this.db.prepare("DELETE FROM app_logs").run();
+  }
+
+  // ------------------------------------------------------------------ wissen
+
+  /**
+   * Alles weggooien en opnieuw beginnen.
+   *
+   * `scope` bepaalt hoe ver dat gaat, en dat onderscheid is belangrijk: de
+   * scrape-data komt van ah.nl en is altijd opnieuw op te halen, maar het
+   * profiel, de eetmomenten en de opgeslagen dagen zijn van jou en staan nergens
+   * anders. Standaard blijft die laatste categorie dus staan.
+   *
+   *   'scrape' — recepten, producten, koppelingen, voedingswaarde, het
+   *              scrape-archief, de rondes en de log.
+   *   'alles'  — daarbovenop het profiel, de eetmomenten, opgeslagen dagen,
+   *              favorieten en uitgesloten ingredienten.
+   */
+  async wipe(scope: WipeScope = "scrape"): Promise<Record<string, number>> {
+    const scrapeTables = [
+      "recipe_nutrition",
+      "ingredient_matches",
+      "products",
+      "recipes",
+      "scrape_raw",
+      "ingest_runs",
+      "app_state",
+      "app_logs",
+    ];
+    const userTables = [
+      "saved_day_meals",
+      "saved_days",
+      "recipe_prefs",
+      "excluded_ingredients",
+      "meal_slots",
+      "profile",
+    ];
+    // Gebruikersdata eerst: opgeslagen dagen verwijzen naar recepten, dus in de
+    // andere volgorde zou een foreign key ertussen kunnen komen.
+    const tables = scope === "alles" ? [...userTables, ...scrapeTables] : scrapeTables;
+
+    const deleted: Record<string, number> = {};
+    for (const table of tables) {
+      const before = await this.db
+        .prepare(`SELECT COUNT(*) AS n FROM ${table}`)
+        .first<{ n: number }>();
+      await this.db.prepare(`DELETE FROM ${table}`).run();
+      if ((before?.n ?? 0) > 0) deleted[table] = before?.n ?? 0;
+    }
+    return deleted;
   }
 
   // ---------------------------------------------------------------- profiel

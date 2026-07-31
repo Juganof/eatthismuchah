@@ -182,10 +182,20 @@ async function planCandidates(
     excludeRecipeIds: options.excludeRecipeIds,
     limit: options.limit,
   });
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    await store.log("warn", "plan", `geen kandidaten voor ${Math.round(targets.kcal)} kcal`, {
+      dieet: options.diet ?? [],
+      uitgesloten: options.excludeRecipeIds.length,
+    });
+    return [];
+  }
 
   const macroTargets = buildTargets({ ...targets, kcalMode: options.kcalMode });
   const results: PlanOption[] = [];
+  // Hoeveel kandidaten er afvielen omdat we hun voedingswaarde niet per
+  // ingredient kennen. Zonder dat cijfer is "geen recept gevonden" een raadsel;
+  // met dat cijfer weet je meteen dat het aan de koppelingen ligt.
+  let zonderCijfers = 0;
 
   for (const candidate of candidates) {
     const recipe = await store.getRecipe(candidate.id);
@@ -210,7 +220,10 @@ async function planCandidates(
       macroTargets,
       options.pinNearFit && near ? { minScale: 0.9, maxScale: 1.1 } : undefined,
     );
-    if (!plan) continue;
+    if (!plan) {
+      zonderCijfers++;
+      continue;
+    }
 
     let score = scoreOf(plan, candidate, options.slotTags ?? []);
     // Bij herrollen weegt gelijkenis met het vervangen gerecht net zo zwaar als
@@ -220,6 +233,12 @@ async function planCandidates(
     results.push({ plan, bucket: near ? "origineel" : "herschaald", score });
   }
 
+  await store.log(
+    results.length === 0 ? "warn" : "info",
+    "plan",
+    `${results.length} van ${candidates.length} kandidaten bruikbaar (doel ${Math.round(targets.kcal)} kcal)`,
+    { afgevallenZonderCijfers: zonderCijfers },
+  );
   return results;
 }
 

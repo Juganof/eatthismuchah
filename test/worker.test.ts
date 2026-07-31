@@ -38,6 +38,8 @@ describe("Worker routes", () => {
       "/api/shopping",
       "/api/enrich",
       "/api/products/search",
+      "/api/logs",
+      "/api/wipe",
     ]) {
       expect(html, `${route} wordt niet aangeroepen`).toContain(route);
     }
@@ -107,5 +109,44 @@ describe("Worker routes", () => {
     });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ plans: [] });
+  });
+});
+
+describe("log en wissen", () => {
+  it("geeft de log als platte tekst terug, klaar om te kopiëren", async () => {
+    const { Store } = await import("../src/db/queries");
+    const store = new Store(db);
+    await store.log("error", "ingest", "recept R-R9 mislukt", { fout: "GET -> 403" });
+
+    const response = await fetchWorker("/api/logs?format=text&limit=10");
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("ERROR");
+    expect(text).toContain("recept R-R9 mislukt");
+    expect(text).toContain("GET -> 403");
+  });
+
+  it("filtert op niveau", async () => {
+    const response = await fetchWorker("/api/logs?level=info&limit=10");
+    const body = (await response.json()) as { rows: { level: string }[] };
+    expect(body.rows.every((r) => r.level === "info")).toBe(true);
+  });
+
+  it("wist de scrape-data en logt dat als eerste nieuwe regel", async () => {
+    const response = await fetchWorker("/api/wipe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = (await response.json()) as { scope: string; total: number };
+
+    expect(response.status).toBe(200);
+    expect(body.scope).toBe("scrape");
+
+    const logs = (await (await fetchWorker("/api/logs?limit=5")).json()) as {
+      rows: { message: string }[];
+    };
+    expect(logs.rows[0]!.message).toContain("database gewist");
   });
 });

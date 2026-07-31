@@ -834,8 +834,84 @@ function loadAutoLogs() {
 }
 
 $("autoLogsBox").addEventListener("toggle", () => {
-  if ($("autoLogsBox").open) loadAutoLogs();
+  if ($("autoLogsBox").open) { loadAutoLogs(); loadAppLogs(); }
 });
+
+// ---------------------------------------------------------------- app-log
+
+/** Eén logregel: tijd, herkomst, bericht en de losse details erachter. */
+function logLine(r) {
+  const at = new Date(r.at).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const detail = r.detail ? ' <span class="det">' + escapeHtml(r.detail) + '</span>' : "";
+  return '<div class="logline ' + escapeHtml(r.level) + '">'
+    + '<span class="at">' + at + '</span>'
+    + '<span class="src">' + escapeHtml(r.source) + '</span>'
+    + '<span class="msg">' + escapeHtml(r.message) + detail + '</span>'
+    + '</div>';
+}
+
+function loadAppLogs() {
+  const level = $("logLevel").value;
+  return api("/api/logs?limit=200" + (level ? "&level=" + level : "")).then((data) => {
+    $("appLogs").innerHTML = data.rows.length
+      ? data.rows.map(logLine).join("")
+      : '<p class="muted">Nog niets gelogd.</p>';
+  }).catch(() => {});
+}
+
+$("logLevel").onchange = loadAppLogs;
+$("logRefresh").onclick = () => run($("logRefresh"), loadAppLogs);
+
+$("logClear").onclick = () => run($("logClear"), async () => {
+  await postJson("/api/logs/clear", {});
+  toast("Log leeggemaakt.");
+  loadAppLogs();
+});
+
+/**
+ * De hele log als platte tekst op het klembord. navigator.clipboard bestaat
+ * alleen op een beveiligde verbinding en na een echte klik; lukt het niet, dan
+ * valt dit terug op een selecteerbaar tekstvak zodat kopiëren altijd kán.
+ */
+$("logCopy").onclick = () => run($("logCopy"), async () => {
+  const res = await fetch("/api/logs?limit=1000&format=text");
+  const text = await res.text();
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Log gekopieerd (" + text.split("\\n").length + " regels).");
+  } catch (err) {
+    const box = document.createElement("textarea");
+    box.value = text;
+    box.style.cssText = "width:100%;height:180px;margin-top:10px";
+    $("appLogs").prepend(box);
+    box.focus();
+    box.select();
+    toast("Kopiëren mocht niet automatisch; de tekst staat geselecteerd klaar.", true);
+  }
+});
+
+// ------------------------------------------------------------- alles wissen
+
+/** Wissen is onomkeerbaar, dus twee keer vragen: een bevestiging en het woord. */
+async function wipeWithConfirm(button, scope) {
+  const wat = scope === "alles"
+    ? "ALLES, inclusief je profiel, eetmomenten en opgeslagen dagen"
+    : "alle gescrapete recepten, producten, koppelingen en het scrape-archief (je profiel en opgeslagen dagen blijven staan)";
+  if (!confirm("Dit verwijdert " + wat + ". Doorgaan?")) return;
+  if (prompt('Typ WISSEN om te bevestigen.') !== "WISSEN") { toast("Geannuleerd."); return; }
+
+  await run(button, async () => {
+    const r = await postJson("/api/wipe", { scope });
+    toast(r.total + " rijen verwijderd.");
+    loadStats();
+    loadAutoStatus();
+    loadAppLogs();
+  });
+}
+
+$("wipe").onclick = () => wipeWithConfirm($("wipe"), "scrape");
+$("wipeAll").onclick = () => wipeWithConfirm($("wipeAll"), "alles");
+
 
 $("autoRun").onclick = () => run($("autoRun"), async () => {
   // Handmatig op de knop drukken is een bewuste keuze om nu te kijken wat AH
@@ -846,7 +922,7 @@ $("autoRun").onclick = () => run($("autoRun"), async () => {
   toast(wat + " (" + r.detail + ").");
   loadAutoStatus();
   loadStats();
-  if ($("autoLogsBox").open) loadAutoLogs();
+  if ($("autoLogsBox").open) { loadAutoLogs(); loadAppLogs(); }
 });
 
 function loadStats() {

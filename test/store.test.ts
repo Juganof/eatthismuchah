@@ -448,3 +448,62 @@ describe("purgeUnusableRecipes", () => {
     expect(await store.purgeUnusableRecipes(0)).toBe(0);
   });
 });
+
+describe("applicatielog", () => {
+  it("bewaart regels met niveau, herkomst en details, nieuwste eerst", async () => {
+    const store = freshStore();
+    await store.log("info", "ah", "recipe R-R1 -> 200", { bytes: 12 });
+    await store.log("error", "ingest", "recept R-R1 mislukt", { fout: "GET -> 403" });
+
+    const rows = await store.recentLogs(10);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.message).toBe("recept R-R1 mislukt");
+    expect(JSON.parse(rows[0]!.detail!)).toEqual({ fout: "GET -> 403" });
+    expect(await store.recentLogs(10, "info")).toHaveLength(1);
+    expect(await store.countLogs()).toBe(2);
+  });
+
+  it("laat de aanroeper nooit omvallen als loggen misgaat", async () => {
+    const store = freshStore();
+    await db!.prepare("DROP TABLE app_logs").run();
+    // Geen throw: een kapotte log mag een lopende scrape niet stoppen.
+    await expect(store.log("info", "ah", "iets")).resolves.toBeUndefined();
+  });
+
+  it("houdt alleen de nieuwste regels over bij het inkorten", async () => {
+    const store = freshStore();
+    for (let i = 0; i < 5; i++) await store.log("info", "test", "regel " + i);
+
+    await store.trimLogs(2);
+
+    const rows = await store.recentLogs(10);
+    expect(rows.map((r) => r.message)).toEqual(["regel 4", "regel 3"]);
+  });
+});
+
+describe("wipe", () => {
+  it("gooit de scrape-data weg maar laat profiel en opgeslagen dagen staan", async () => {
+    const store = freshStore();
+    await seedRecipes(store, [
+      { id: "R-R1", title: "Kwark", ingredients: [{ name: "kwark", grams: 200, per100g: FOODS.kwark! }] },
+    ]);
+    await store.putProfile({ ...DEFAULT_PROFILE, weightKg: 82 });
+
+    const deleted = await store.wipe();
+
+    expect(deleted["recipes"]).toBe(1);
+    expect(await store.countRecipes()).toBe(0);
+    expect(await store.getProduct("wi-kwark")).toBeNull();
+    // Het profiel is van de gebruiker en staat nergens anders: dat blijft.
+    expect((await store.getProfile()).weightKg).toBe(82);
+  });
+
+  it("gooit met scope 'alles' ook het profiel weg", async () => {
+    const store = freshStore();
+    await store.putProfile({ ...DEFAULT_PROFILE, weightKg: 82 });
+
+    await store.wipe("alles");
+
+    expect((await store.getProfile()).weightKg).toBe(DEFAULT_PROFILE.weightKg);
+  });
+});

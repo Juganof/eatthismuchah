@@ -52,7 +52,20 @@ export interface ClientOptions {
 }
 
 export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptions) {
-  return new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw), options);
+  return new AhClient(
+    env.AH_USER_AGENT,
+    (raw) => {
+      void store.putRaw(raw);
+      // Elk verzoek aan ah.nl ook als logregel: de statuscode per verzoek is
+      // precies wat je wilt zien als er niets binnenkomt, en het archief is
+      // daar te log voor — daar staat de hele payload in.
+      void store.log(raw.status >= 400 ? "warn" : "info", "ah", `${raw.kind} ${raw.ref} -> ${raw.status}`, {
+        url: raw.url,
+        bytes: raw.body.length,
+      });
+    },
+    options,
+  );
 }
 
 /** Herkent de blokkade van AH's botbescherming in een foutmelding. */
@@ -128,7 +141,9 @@ export async function ingestQueries(
       found = await client.searchRecipes(query, perQuery);
     } catch (err) {
       if (isBlocked(err)) blocked++;
-      errors.push(`search "${query}": ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`search "${query}": ${message}`);
+      await store.log("error", "ingest", `zoeken op "${query}" mislukt`, { fout: message });
       continue;
     }
 
@@ -147,7 +162,12 @@ export async function ingestQueries(
       if (added >= limit) break;
       try {
         const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
-        if (!full || full.ingredients.length === 0) continue;
+        if (!full || full.ingredients.length === 0) {
+          await store.log("warn", "ingest", `${stub.id} kwam zonder ingredienten binnen`, {
+            titel: stub.title,
+          });
+          continue;
+        }
         await store.putRecipe(full);
         await computeNutrition(store, client, full);
         // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
@@ -158,12 +178,20 @@ export async function ingestQueries(
         added++;
       } catch (err) {
         if (isBlocked(err)) blocked++;
-        errors.push(`recipe ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(`recipe ${stub.id}: ${message}`);
+        await store.log("error", "ingest", `recept ${stub.id} mislukt`, { fout: message });
       }
     }
     if (added >= limit) break;
   }
 
+  await store.log(
+    blocked > 0 ? "warn" : "info",
+    "ingest",
+    `${added} recepten toegevoegd voor ${wantedMoment ?? "alles"}`,
+    { queries, skipped, blocked, fouten: errors.length },
+  );
   return { added, skipped, blocked, errors };
 }
 
@@ -198,6 +226,7 @@ export async function repairEmptyRecipes(
       const recipe = await client.getRecipe(id);
       if (!recipe || recipe.ingredients.length === 0) {
         errors.push(`${id}: nog steeds geen ingredienten`);
+        await store.log("warn", "repair", `${id} heeft nog steeds geen ingredienten`);
         continue;
       }
       await store.putRecipe(recipe);
@@ -205,10 +234,15 @@ export async function repairEmptyRecipes(
       repaired++;
     } catch (err) {
       if (isBlocked(err)) blocked++;
-      errors.push(`${id}: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`${id}: ${message}`);
+      await store.log("error", "repair", `${id} aanvullen mislukt`, { fout: message });
     }
   }
 
+  await store.log("info", "repair", `${repaired} van ${ids.length} lege recepten aangevuld`, {
+    blocked,
+  });
   return { examined: ids.length, repaired, blocked, errors };
 }
 
@@ -257,15 +291,29 @@ export async function enrichIngredientMatches(
         const linked = await lookupLinkedProduct(name, productId, client, store);
         if (linked) {
           matched++;
+          await store.log("info", "enrich", `"${name}" via AH's eigen productlink`, {
+            product: linked.title,
+            webshopId: linked.webshopId,
+          });
           continue;
         }
       }
-      const { outcome } = await lookupIngredientMatch(name, client, store);
-      if (outcome === "matched") matched++;
-      else unmatched++;
+      const { outcome, product, score } = await lookupIngredientMatch(name, client, store);
+      if (outcome === "matched") {
+        matched++;
+        await store.log("info", "enrich", `"${name}" gekoppeld aan "${product?.title}"`, {
+          webshopId: product?.webshopId,
+          score,
+        });
+      } else {
+        unmatched++;
+        await store.log("warn", "enrich", `"${name}" leverde geen bruikbaar product op`);
+      }
     } catch (err) {
       if (isBlocked(err)) blocked++;
-      errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`${name}: ${message}`);
+      await store.log("error", "enrich", `"${name}" opzoeken mislukt`, { fout: message });
     }
   }
 

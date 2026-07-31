@@ -190,3 +190,17 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingest_runs_started ON ingest_runs(started_at DESC);
+
+-- Een echte log van wat de app doet, in de database in plaats van in een
+-- worker-log dat je nooit ziet. Bedoeld om te kunnen kopiëren en opsturen.
+CREATE TABLE IF NOT EXISTS app_logs (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  at      INTEGER NOT NULL,
+  level   TEXT NOT NULL,           -- 'info' | 'warn' | 'error'
+  source  TEXT NOT NULL,           -- 'ah' | 'auto' | 'ingest' | 'api' | 'plan'
+  message TEXT NOT NULL,
+  detail  TEXT                     -- vrije context als JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_logs_at ON app_logs(at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_logs_level ON app_logs(level, at DESC);

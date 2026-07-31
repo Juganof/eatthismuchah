@@ -60,6 +60,8 @@ export interface AutoConfig {
   purgeGraceMs: number;
   /** Hoeveel onbruikbare recepten er per ronde weggaan. */
   purgeBatch: number;
+  /** Hoeveel logregels er bewaard blijven; oudere gaan elke ronde weg. */
+  logKeep: number;
   /**
    * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
    * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
@@ -80,6 +82,7 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   enrichEvery: 3,
   purgeGraceMs: 24 * 60 * 60 * 1000,
   purgeBatch: 200,
+  logKeep: 2000,
 };
 
 export interface AutoResult {
@@ -116,6 +119,7 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     enrichEvery: read("AUTO_ENRICH_EVERY", DEFAULT_AUTO_CONFIG.enrichEvery),
     purgeGraceMs: read("AUTO_PURGE_GRACE_MS", DEFAULT_AUTO_CONFIG.purgeGraceMs),
     purgeBatch: read("AUTO_PURGE_BATCH", DEFAULT_AUTO_CONFIG.purgeBatch),
+    logKeep: read("AUTO_LOG_KEEP", DEFAULT_AUTO_CONFIG.logKeep),
   };
 }
 
@@ -135,11 +139,15 @@ export async function runAutoIngest(
   if (!options.force) {
     const until = Number((await store.getState(COOLDOWN_UNTIL)) ?? 0);
     if (until > now) {
+      await store.log("info", "auto", "ronde overgeslagen: afkoelen na blokkade", {
+        tot: new Date(until).toISOString(),
+      });
       return { ran: false, reason: "afkoelen na blokkade", cooldownUntil: until };
     }
 
     const today = await store.runTotalsSince(startOfToday());
     if (today.added + today.repaired >= config.dailyMax) {
+      await store.log("info", "auto", `ronde overgeslagen: dagbudget van ${config.dailyMax} bereikt`);
       return { ran: false, reason: `dagbudget van ${config.dailyMax} recepten bereikt` };
     }
   }
@@ -149,6 +157,14 @@ export async function runAutoIngest(
   // recepten waar echt iets in zit. Zie `purgeUnusableRecipes` voor wat er weg
   // mag — favorieten en opgeslagen dagen blijven altijd staan.
   const purged = await store.purgeUnusableRecipes(config.purgeGraceMs, config.purgeBatch);
+  if (purged > 0) {
+    await store.log("info", "auto", `${purged} onbruikbare recepten opgeruimd`, {
+      respijtUren: Math.round(config.purgeGraceMs / 3600000),
+    });
+  }
+  // De log begrensd houden, anders groeit hij oneindig door in een database
+  // waar verder alles een bovengrens heeft.
+  await store.trimLogs(config.logKeep);
 
   const clientOptions = { minIntervalMs: config.minIntervalMs, backoffMs: config.backoffMs };
   // Lege recepten eerst: die kosten één pagina en leveren meteen een bruikbaar
@@ -156,6 +172,7 @@ export async function runAutoIngest(
   const empty = await store.countWithoutIngredients();
 
   if (empty > 0) {
+    await store.log("info", "auto", `ronde: ${empty} lege recepten aanvullen`);
     const runId = await store.startRun("repair", `${empty} open`);
     const result = await repairEmptyRecipes(env, config.batch, clientOptions);
     await store.finishRun(runId, { repaired: result.repaired, blocked: result.blocked, errors: result.errors });
@@ -180,6 +197,7 @@ export async function runAutoIngest(
   if (enrichTurn === 0) {
     const openNames = await store.countIngredientNamesWithoutMatch();
     if (openNames > 0) {
+      await store.log("info", "auto", `ronde: ${openNames} ingredient-koppelingen open`);
       const runId = await store.startRun("enrich", `${openNames} koppelingen open`);
       const result = await enrichIngredientMatches(env, config.enrichBatch, clientOptions);
       await store.finishRun(runId, { repaired: result.matched, blocked: result.blocked, errors: result.errors });
@@ -205,6 +223,7 @@ export async function runAutoIngest(
   const query = queries[Math.floor(cursor / MOMENTS.length) % queries.length]!;
   await store.setState(CURSOR, String((cursor + 1) % (MOMENTS.length * queries.length)));
 
+  await store.log("info", "auto", `ronde: nieuwe recepten voor ${moment}`, { query });
   const runId = await store.startRun("moment", `${moment}: ${query}`);
   const result = await ingestQueries(env, [query], config.batch, moment, clientOptions);
   await store.finishRun(runId, { added: result.added, blocked: result.blocked, errors: result.errors });
@@ -246,6 +265,10 @@ async function applyCooldown(
   const cooldownMs = Math.min(config.cooldownMs * 2 ** (streak - 1), config.maxCooldownMs);
   const until = now + cooldownMs;
   await store.setState(COOLDOWN_UNTIL, String(until));
+  await store.log("warn", "auto", `AH blokkeerde ${blocked}x; ${Math.round(cooldownMs / 60000)} min afkoelen`, {
+    blokkadesOpEenRij: streak,
+    tot: new Date(until).toISOString(),
+  });
   return until;
 }
 

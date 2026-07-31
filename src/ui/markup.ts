@@ -144,9 +144,24 @@ export function browseTab(): string {
     </div>
     <details id="autoLogsBox">
       <summary>Logs</summary>
-      <p class="muted">De laatste verzoeken aan ah.nl, met het HTTP-statuscode
-      per verzoek &mdash; zo zie je precies wat er misging in plaats van alleen
-      de samenvatting per ronde.</p>
+      <p class="muted">Wat de app doet, regel voor regel: elk verzoek aan ah.nl met
+      zijn statuscode, welke ingredi&euml;nten gekoppeld werden, wat er opgeruimd is
+      en elke fout. Met &laquo;Kopieer&raquo; heb je de hele log als tekst op je
+      klembord om door te sturen.</p>
+      <div class="actions">
+        <button class="secondary small" id="logCopy">Kopieer log</button>
+        <button class="secondary small" id="logRefresh">Ververs</button>
+        <button class="secondary small" id="logClear">Log leegmaken</button>
+        <select id="logLevel" class="small">
+          <option value="">alles</option>
+          <option value="error">alleen fouten</option>
+          <option value="warn">waarschuwingen</option>
+          <option value="info">informatie</option>
+        </select>
+      </div>
+      <div id="appLogs"></div>
+      <p class="muted">Daaronder het scrape-archief: dezelfde verzoeken, maar met
+      de volledige payload erbij.</p>
       <div id="autoLogs"></div>
     </details>
   </div>
@@ -191,6 +206,13 @@ export function adminCard(): string {
         <button class="secondary small" id="purge">Onbruikbare recepten opruimen</button>
         <button class="secondary small" id="reparse">Archief opnieuw parsen</button>
         <button class="secondary small" id="probe">AH-verbinding testen</button>
+      </div>
+      <p class="muted">Opnieuw beginnen: dit gooit alle gescrapete recepten,
+      producten, koppelingen en het archief weg. Je profiel, eetmomenten en
+      opgeslagen dagen blijven staan &mdash; tenzij je voor &laquo;alles&raquo; kiest.</p>
+      <div class="actions">
+        <button class="secondary small danger" id="wipe">Alles wissen</button>
+        <button class="secondary small danger" id="wipeAll">Alles wissen, ook mijn profiel</button>
       </div>
       <p class="muted" id="stats"></p>
     </details>

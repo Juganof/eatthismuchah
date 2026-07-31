@@ -69,7 +69,61 @@ app.onError((err, c) => {
     ? " — draai de migratie: npm run db:migrate"
     : "";
   console.error("unhandled:", message);
+  // Ook de log in, zodat een fout die de gebruiker als toast voorbij ziet komen
+  // achteraf nog terug te vinden en op te sturen is.
+  void storeFor(c.env).log("error", "api", message, { pad: c.req.path });
   return c.json({ error: message + hint }, 500);
+});
+
+/**
+ * De applicatielog: wat de app deed, in leesbare regels. `?format=text` geeft
+ * platte tekst terug — dat is wat de kopieerknop in de UI ophaalt, zodat je het
+ * ongewijzigd kunt doorsturen.
+ */
+app.get("/api/logs", async (c) => {
+  const store = storeFor(c.env);
+  const limit = Math.min(Number(c.req.query("limit") ?? 200) || 200, 1000);
+  const levelParam = c.req.query("level");
+  const level = levelParam === "warn" || levelParam === "error" || levelParam === "info"
+    ? levelParam
+    : undefined;
+  const rows = await store.recentLogs(limit, level);
+
+  if (c.req.query("format") === "text") {
+    const header = `# app-log, ${rows.length} regels, nieuwste eerst, ${new Date().toISOString()}`;
+    const body = rows
+      .map((r) => {
+        const at = new Date(r.at).toISOString().replace("T", " ").slice(0, 19);
+        return `${at} ${r.level.toUpperCase().padEnd(5)} ${r.source.padEnd(7)} ${r.message}` +
+          (r.detail ? ` ${r.detail}` : "");
+      })
+      .join("\n");
+    return c.text(`${header}\n${body}\n`);
+  }
+
+  return c.json({ rows, total: await store.countLogs() });
+});
+
+app.post("/api/logs/clear", async (c) => {
+  await storeFor(c.env).clearLogs();
+  return c.json({ ok: true });
+});
+
+/**
+ * Alles weggooien. `scope: "scrape"` (standaard) laat het profiel, de
+ * eetmomenten en de opgeslagen dagen staan — dat is jouw data en die is nergens
+ * anders vandaan te halen; `scope: "alles"` gooit ook die weg.
+ */
+app.post("/api/wipe", async (c) => {
+  const body = await c.req.json<{ scope?: string }>().catch(() => ({}) as { scope?: string });
+  const scope = body.scope === "alles" ? "alles" : "scrape";
+  const store = storeFor(c.env);
+  const deleted = await store.wipe(scope);
+  const total = Object.values(deleted).reduce((sum, n) => sum + n, 0);
+  // Ná het wissen loggen: de log is zelf net leeggegooid, dus dit is meteen de
+  // eerste regel van de nieuwe geschiedenis.
+  await store.log("warn", "api", `database gewist (${scope}): ${total} rijen`, deleted);
+  return c.json({ scope, deleted, total });
 });
 
 app.get("/", (c) => c.html(renderPage()));

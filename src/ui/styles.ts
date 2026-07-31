@@ -60,6 +60,9 @@ export const styles = `
   button:disabled { opacity: .55; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
   button.small { width: auto; padding: 7px 12px; font-size: .82rem; margin: 0; }
+  /* Wissen is onomkeerbaar, dus die knoppen zien er ook zo uit. */
+  button.danger { color: var(--warn); border-color: var(--warn); }
+  select.small { width: auto; padding: 6px 10px; font-size: .82rem; margin: 0; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
   .row { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
@@ -91,6 +94,20 @@ export const styles = `
   .note { font-size: .78rem; color: var(--warn); margin-top: 8px; }
   /* Voor waarschuwende tekst midden in een regel, waar .note te veel marge geeft. */
   .warnish { color: var(--warn); }
+
+  /* De applicatielog: veel korte regels, dus compact en met vaste breedte voor
+     het tijdstip zodat je verticaal kunt scannen. */
+  .logline {
+    display: flex; gap: 8px; padding: 3px 0; font-size: .76rem; line-height: 1.35;
+    border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums;
+  }
+  .logline:last-child { border-bottom: 0; }
+  .logline .at { color: var(--muted); white-space: nowrap; }
+  .logline .src { color: var(--muted); min-width: 52px; }
+  .logline.error .msg { color: var(--warn); font-weight: 600; }
+  .logline.warn .msg { color: var(--warn); }
+  .logline .det { color: var(--muted); }
+  #appLogs { max-height: 340px; overflow-y: auto; }
   #browseQuery { margin-top: 4px; }
   #browseOut .row a { text-decoration: none; }
   .muted { color: var(--muted); font-size: .8rem; }
