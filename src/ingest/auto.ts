@@ -34,6 +34,7 @@ const CURSOR = "auto:cursor";
 const COOLDOWN_UNTIL = "auto:cooldown_until";
 const BLOCK_STREAK = "auto:block_streak";
 const ENRICH_TURN = "auto:enrich_turn";
+const PAUSED = "auto:paused";
 
 export interface AutoConfig {
   /** Recepten per ronde. Klein houden: een ronde moet binnen de worker passen. */
@@ -165,6 +166,13 @@ export async function runAutoIngest(
   const now = Date.now();
 
   if (!options.force) {
+    // Uitgezet betekent uit. Zonder deze schakelaar is de database niet leeg te
+    // houden: de cron draait elke twee minuten, dus alles wat je wist staat er
+    // een paar tellen later weer in.
+    if ((await store.getState(PAUSED)) === "1") {
+      return { ran: false, reason: "automatisch bijvullen staat uit" };
+    }
+
     const until = Number((await store.getState(COOLDOWN_UNTIL)) ?? 0);
     if (until > now) {
       await store.log("info", "auto", "ronde overgeslagen: afkoelen na blokkade", {
@@ -324,6 +332,13 @@ async function applyCooldown(
   return until;
 }
 
+/** Zet het automatisch bijvullen aan of uit. Blijft staan tot je hem omzet. */
+export async function setAutoPaused(env: ScrapeEnv, paused: boolean): Promise<void> {
+  const store = new Store(env.DB);
+  await store.setState(PAUSED, paused ? "1" : "0");
+  await store.log("info", "auto", `automatisch bijvullen ${paused ? "uitgezet" : "aangezet"}`);
+}
+
 /** Stand van zaken voor de UI: loopt het nog, en hoe hard. */
 export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AUTO_CONFIG) {
   const store = new Store(env.DB);
@@ -336,6 +351,7 @@ export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AU
     openLegeRecepten: await store.countWithoutIngredients(),
     onbruikbareRecepten: await store.countUnusableRecipes(config.purgeGraceMs),
     openKoppelingen: await store.countIngredientNamesWithoutMatch(),
+    gepauzeerd: (await store.getState(PAUSED)) === "1",
     afkoelenTot: cooldownUntil > Date.now() ? cooldownUntil : null,
     blokkadesOpEenRij: Number((await store.getState(BLOCK_STREAK)) ?? 0),
     volgende: MOMENTS[Number((await store.getState(CURSOR)) ?? 0) % MOMENTS.length],

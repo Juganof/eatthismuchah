@@ -225,7 +225,8 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `POST /api/purge` | Onbruikbare recepten opruimen (`graceMs` optioneel) |
 | `GET /api/logs` | De applicatielog; `?format=text` geeft platte tekst, `?level=error` filtert |
 | `POST /api/logs/clear` | Log leegmaken |
-| `POST /api/wipe` | Alles wissen (`{"scope":"scrape"}` of `{"scope":"alles"}`) |
+| `POST /api/wipe` | Alles wissen (`{"scope":"scrape"}` of `{"scope":"alles"}`); zet het bijvullen uit |
+| `POST /api/auto/pause` | Automatisch bijvullen aan- of uitzetten |
 | `GET /api/auto/status` | Stand van het automatisch bijvullen |
 | `POST /api/auto/run` | Nu een ronde draaien in plaats van wachten op de cron |
 | `GET /api/browse/recipes` | Alle recepten met labels, voeding en dekking |
@@ -250,6 +251,12 @@ Te filteren op niveau, en met **Kopieer log** heb je alles als platte tekst op j
 klembord — precies de vorm om door te sturen als je wilt laten uitzoeken wat de app
 deed. De log blijft begrensd op de laatste 2000 regels (`AUTO_LOG_KEEP`); ouder gaat
 elke automatische ronde weg.
+
+Wissen zet het automatisch bijvullen meteen uit, en dat is geen bijzaak: de cron
+draait elke twee minuten, dus zonder die pauze staat de database een paar tellen later
+weer vol en lijkt het alsof het wissen niet werkte. Aanzetten doe je met de knop
+"Bijvullen aanzetten" bij Automatisch bijvullen (of `POST /api/auto/pause`
+`{"paused":false}`).
 
 **Alles wissen** staat onder Beheer & database, in twee smaken. De gewone knop gooit
 de scrape-data weg (recepten, producten, koppelingen, voedingswaarde, het archief, de

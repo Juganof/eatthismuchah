@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
-import { DEFAULT_AUTO_CONFIG, autoStatus, configFrom, runAutoIngest } from "../src/ingest/auto";
+import {
+  DEFAULT_AUTO_CONFIG,
+  autoStatus,
+  configFrom,
+  runAutoIngest,
+  setAutoPaused,
+} from "../src/ingest/auto";
 import { createTestDb, type TestDb } from "./helpers/d1";
 import { FOODS, seedRecipes } from "./helpers/seed";
 
@@ -504,5 +510,45 @@ describe("koppelen krijgt voorrang zolang er niets te plannen valt", () => {
     const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 3 });
 
     expect(result.mode).toBe("enrich");
+  });
+});
+
+describe("bijvullen uitzetten", () => {
+  it("doet niets meer zolang het uitstaat", async () => {
+    stubAh();
+    const env = envFor();
+    await setAutoPaused(env, true);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    expect(result.ran).toBe(false);
+    expect(result.reason).toContain("staat uit");
+    expect((await autoStatus(env, fastConfig)).gepauzeerd).toBe(true);
+  });
+
+  it("loopt weer zodra je hem aanzet", async () => {
+    stubAh();
+    const env = envFor();
+    await setAutoPaused(env, true);
+    await setAutoPaused(env, false);
+
+    expect((await runAutoIngest(env, fastConfig)).ran).toBe(true);
+  });
+
+  it("wist niets als de automaat er meteen weer overheen zou lopen", async () => {
+    // Dit is waarom wissen de automaat uitzet: de cron draait elke twee minuten,
+    // dus zonder pauze staat de database een paar tellen later weer vol en lijkt
+    // het alsof het wissen niet gewerkt heeft.
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    await runAutoIngest(env, fastConfig);
+    expect(await store.countRecipes()).toBeGreaterThan(0);
+
+    await store.wipe();
+    await setAutoPaused(env, true);
+    await runAutoIngest(env, fastConfig);
+
+    expect(await store.countRecipes()).toBe(0);
   });
 });

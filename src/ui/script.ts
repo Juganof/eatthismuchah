@@ -783,6 +783,9 @@ $("reparse").onclick = () => run($("reparse"), async () => {
 function renderAutoStatus(s) {
   const v = s.vandaag || {};
   const binnen = (v.added || 0) + (v.repaired || 0);
+  // De schakelaar volgt de stand: staat het bijvullen uit, dan is de knop de
+  // manier om het weer aan te zetten.
+  $("autoPause").textContent = s.gepauzeerd ? "Bijvullen aanzetten" : "Bijvullen uitzetten";
   const chips = '<div class="macros">'
     + '<span class="macro">vandaag <b>' + binnen + ' / ' + s.dagbudget + '</b></span>'
     + '<span class="macro">rondes <b>' + (v.runs || 0) + '</b></span>'
@@ -798,6 +801,9 @@ function renderAutoStatus(s) {
   const streak = s.blokkadesOpEenRij || 0;
   const streakNote = streak > 1
     ? ' AH blokkeerde ons ' + streak + 'x op rij, dus de afkoelperiode loopt nu op.'
+    : "";
+  const uit = s.gepauzeerd
+    ? '<p class="note">Automatisch bijvullen staat uit. De database blijft zoals hij nu is.</p>'
     : "";
   const koelt = s.afkoelenTot
     ? '<p class="note">AH blokkeerde ons even. Het bijvullen ligt stil tot '
@@ -817,7 +823,7 @@ function renderAutoStatus(s) {
       + '<span class="amt">' + wat + geblokkeerd + '</span></div>';
   }).join("");
 
-  $("autoStatus").innerHTML = chips + koelt
+  $("autoStatus").innerHTML = chips + uit + koelt
     + (laatste ? '<p class="muted" style="margin:10px 0 0">Laatste rondes:</p>' + laatste : "");
 }
 
@@ -902,16 +908,27 @@ async function wipeWithConfirm(button, scope) {
 
   await run(button, async () => {
     const r = await postJson("/api/wipe", { scope });
-    toast(r.total + " rijen verwijderd.");
+    // Het bijvullen gaat automatisch uit: de cron draait elke twee minuten, dus
+    // anders staat de database binnen een paar tellen weer vol en lijkt het
+    // alsof het wissen niet werkte.
+    toast(r.total + " rijen verwijderd. Automatisch bijvullen staat nu uit.");
     loadStats();
     loadAutoStatus();
     loadAppLogs();
+    loadBrowse();
   });
 }
 
 $("wipe").onclick = () => wipeWithConfirm($("wipe"), "scrape");
 $("wipeAll").onclick = () => wipeWithConfirm($("wipeAll"), "alles");
 
+
+$("autoPause").onclick = () => run($("autoPause"), async () => {
+  const status = await api("/api/auto/status");
+  const r = await postJson("/api/auto/pause", { paused: !status.gepauzeerd });
+  toast(r.paused ? "Automatisch bijvullen staat uit." : "Automatisch bijvullen loopt weer.");
+  loadAutoStatus();
+});
 
 $("autoRun").onclick = () => run($("autoRun"), async () => {
   // Handmatig op de knop drukken is een bewuste keuze om nu te kijken wat AH

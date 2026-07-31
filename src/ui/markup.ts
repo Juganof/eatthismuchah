@@ -141,6 +141,7 @@ export function browseTab(): string {
     <div id="autoStatus"></div>
     <div class="actions">
       <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
+      <button class="secondary small" id="autoPause">Bijvullen uitzetten</button>
     </div>
     <details id="autoLogsBox">
       <summary>Logs</summary>

@@ -342,3 +342,31 @@ describe("de paginastate van AH's receptpagina", () => {
     );
   });
 });
+
+describe("aantal porties", () => {
+  it("negeert een verwijzing uit de flight-stream als getal", () => {
+    // "$21:props:children:props:recipeServings" is een verwijzing, geen aantal.
+    // Zonder deze controle werd een borrelhapje voor 4 personen "21 porties",
+    // en daarmee klopte elke hoeveelheid per portie niet meer.
+    const [recipe] = collectRecipes({
+      id: 1202571,
+      title: "Vegaballetjes",
+      href: "/allerhande/recept/R-R1202571/vegaballetjes",
+      servings: "$21:props:children:props:recipeServings",
+      serving: { __typename: "RecipeSummaryServing", number: 4, servingType: "PERSONS" },
+      ingredients: [{ name: { singular: "yoghurt" }, quantity: 100, quantityUnit: { singular: "g" } }],
+    });
+    expect(recipe?.servings).toBe(4);
+  });
+
+  it("valt terug op recipeYield uit de ld+json", () => {
+    const [recipe] = collectRecipes({
+      "@type": "Recipe",
+      name: "Vegaballetjes",
+      url: "https://www.ah.nl/allerhande/recept/R-R1202571/vegaballetjes",
+      recipeYield: "12",
+      recipeIngredient: ["100 g yoghurt"],
+    });
+    expect(recipe?.servings).toBe(12);
+  });
+});

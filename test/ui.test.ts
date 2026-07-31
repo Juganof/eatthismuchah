@@ -25,7 +25,10 @@ describe("gegenereerde clientcode", () => {
     const ids = [...script.matchAll(/\$\("([a-zA-Z0-9_-]+)"\)/g)].map((m) => m[1]!);
     // Alleen de nieuwe log- en wisknoppen; de rest van de UI zit in andere
     // tabbladen die deze test niet inleest.
-    const own = ["logCopy", "logRefresh", "logClear", "logLevel", "appLogs", "wipe", "wipeAll"];
+    const own = [
+      "logCopy", "logRefresh", "logClear", "logLevel", "appLogs",
+      "wipe", "wipeAll", "autoPause",
+    ];
     for (const id of own) {
       expect(ids, `${id} wordt aangesproken`).toContain(id);
       expect(markup, `${id} staat in de markup`).toContain(`id="${id}"`);

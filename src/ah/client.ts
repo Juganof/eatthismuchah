@@ -373,6 +373,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string") {
+    // Verwijzingen binnen de flight-stream ("$21:props:children:...") zijn geen
+    // getallen maar zien er wel zo uit: hieronder zou dat 21 opleveren. Zo werd
+    // een borrelhapje voor 4 personen een recept van "21 porties".
+    if (v.startsWith("$")) return null;
     // AH writes values like "12,5 g" and "1.234 kJ".
     const m = v.replace(",", ".").match(/-?\d+(\.\d+)?/);
     if (m) return Number(m[0]);
@@ -564,11 +568,7 @@ export function collectRecipes(root: unknown): Recipe[] {
         id: recipeId,
         title,
         url: url ?? `${RECIPE_BASE}/recept/${recipeId}`,
-        servings:
-          num(v["servings"]) ??
-          num(v["recipeYield"]) ??
-          num(deepFind(v["servings"], () => true)) ??
-          4,
+        servings: servingsOf(v),
         imageUrl: findImageUrl(v),
         ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
         keywords: parseKeywords(v["keywords"] ?? v["tags"] ?? v["recipeCategory"], v["classifications"]),
@@ -580,6 +580,26 @@ export function collectRecipes(root: unknown): Recipe[] {
 
   visit(root);
   return out;
+}
+
+/**
+ * Het aantal porties waar de ingredienthoeveelheden bij horen. De paginastate
+ * zet dat in `serving.number` ("voor hoeveel personen"), de ld+json in
+ * `recipeYield`. Levert geen van beide een bruikbaar getal, dan is 4 de aanname
+ * die AH zelf ook het vaakst hanteert.
+ */
+function servingsOf(v: Record<string, unknown>): number {
+  const serving = v["serving"];
+  const candidates = [
+    num(v["servings"]),
+    isRecord(serving) ? num(serving["number"]) : null,
+    num(v["recipeYield"]),
+    num(deepFind(v["servings"], (x) => typeof x === "number")),
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== null && candidate > 0) return candidate;
+  }
+  return 4;
 }
 
 /** Parses the server-rendered recipe cards used by AH's current App Router pages. */

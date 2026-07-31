@@ -4,7 +4,7 @@ import { extractEmbeddedJson } from "./ah/scrape";
 
 import { Store, type SavedDayMeal } from "./db/queries";
 import { coverageOf, resolveRecipe } from "./nutrition/resolve";
-import { autoStatus, configFrom, runAutoIngest } from "./ingest/auto";
+import { autoStatus, configFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
   computeNutrition,
@@ -115,15 +115,22 @@ app.post("/api/logs/clear", async (c) => {
  * anders vandaan te halen; `scope: "alles"` gooit ook die weg.
  */
 app.post("/api/wipe", async (c) => {
-  const body = await c.req.json<{ scope?: string }>().catch(() => ({}) as { scope?: string });
+  const body = await c.req
+    .json<{ scope?: string; pause?: boolean }>()
+    .catch(() => ({}) as { scope?: string; pause?: boolean });
   const scope = body.scope === "alles" ? "alles" : "scrape";
   const store = storeFor(c.env);
   const deleted = await store.wipe(scope);
+  // Wissen én het automatisch bijvullen laten doorlopen is zinloos: de cron
+  // draait elke twee minuten, dus binnen een paar tellen staat de database weer
+  // vol. Standaard gaat de automaat daarom uit; `pause: false` laat hem staan.
+  const paused = body.pause !== false;
+  if (paused) await setAutoPaused(c.env, true);
   const total = Object.values(deleted).reduce((sum, n) => sum + n, 0);
   // Ná het wissen loggen: de log is zelf net leeggegooid, dus dit is meteen de
   // eerste regel van de nieuwe geschiedenis.
   await store.log("warn", "api", `database gewist (${scope}): ${total} rijen`, deleted);
-  return c.json({ scope, deleted, total });
+  return c.json({ scope, deleted, total, paused });
 });
 
 app.get("/", (c) => c.html(renderPage()));
@@ -304,6 +311,14 @@ app.post("/api/purge", async (c) => {
 app.get("/api/auto/status", async (c) =>
   c.json(await autoStatus(c.env, configFrom(c.env))),
 );
+
+/** Automatisch bijvullen aan- of uitzetten. */
+app.post("/api/auto/pause", async (c) => {
+  const body = await c.req.json<{ paused?: boolean }>().catch(() => ({}) as { paused?: boolean });
+  const paused = body.paused !== false;
+  await setAutoPaused(c.env, paused);
+  return c.json({ paused });
+});
 
 /** Eén ronde nu draaien, in plaats van wachten op de cron. */
 app.post("/api/auto/run", async (c) => {
