@@ -10,6 +10,9 @@ const ingredient = (over: Partial<PlannedIngredient> & { name: string }): Planne
   productTitle: "AH " + over.name,
   matchScore: 1,
   unmatched: false,
+  originalQuantity: null,
+  unit: null,
+  gramsSource: "explicit",
   ...over,
 });
 

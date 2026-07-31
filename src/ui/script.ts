@@ -57,6 +57,48 @@ async function run(button, fn) {
   finally { button.disabled = false; button.textContent = label; }
 }
 
+/** Short unit word for a recipe line, matching how the recipe itself wrote it. */
+function unitSuffix(source, unit) {
+  if (source === "spoon") {
+    if (unit === "eetlepel") return "el";
+    if (unit === "theelepel") return "tl";
+    return unit || "el";
+  }
+  if (source === "volume") return unit || "ml";
+  if (source === "piece" && unit) return unit;
+  return "";
+}
+
+function formatQty(n) {
+  return String(Math.round(n * 100) / 100);
+}
+
+/**
+ * Bananen blijven bananen en eetlepels blijven eetlepels: alleen ingrediënten die
+ * het recept al in gram opgaf, tonen we in gram. Voor de rest is gram een intern
+ * rekenmiddel voor de voedingswaarde, niet wat je gaat afmeten.
+ */
+function amountFor(i) {
+  const changed = Math.abs(i.scale - 1) > 0.05;
+  const useUnit =
+    (i.gramsSource === "piece" || i.gramsSource === "spoon" || i.gramsSource === "volume")
+    && i.originalQuantity !== null;
+
+  if (!useUnit) {
+    return changed
+      ? '<span class="chg">' + i.grams + ' g</span> <s>' + i.originalGrams + ' g</s>'
+      : i.grams + ' g';
+  }
+
+  const suffix = unitSuffix(i.gramsSource, i.unit);
+  const unitStr = suffix ? " " + suffix : "";
+  const scaledQty = formatQty(i.originalQuantity * i.scale) + unitStr;
+  const origQty = formatQty(i.originalQuantity) + unitStr;
+  return changed
+    ? '<span class="chg">' + scaledQty + '</span> <s>' + origQty + '</s>'
+    : scaledQty;
+}
+
 function macroChips(n) {
   return '<div class="macros">'
     + '<span class="macro">kcal <b>' + g(n.kcal) + '</b></span>'
@@ -224,13 +266,8 @@ function planCard(meal) {
   }
 
   const rows = p.ingredients.map((i) => {
-    // Alleen hoeveelheden benoemen die de solver echt heeft verschoven.
-    const changed = Math.abs(i.scale - 1) > 0.05;
-    const amount = changed
-      ? '<span class="chg">' + i.grams + ' g</span> <s>' + i.originalGrams + ' g</s>'
-      : i.grams + ' g';
     const flag = i.unmatched ? ' <span class="muted">(geen voedingswaarde)</span>' : '';
-    return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span><span class="amt">' + amount + '</span></div>';
+    return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span><span class="amt">' + amountFor(i) + '</span></div>';
   }).join("");
 
   const lowCoverage = p.coverage < 0.8

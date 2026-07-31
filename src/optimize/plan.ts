@@ -29,6 +29,16 @@ export interface PlannedIngredient {
   matchScore: number;
   /** True when nutrition is unknown, so the solver had nothing to go on. */
   unmatched: boolean;
+  /**
+   * Quantity in the recipe's own unit (e.g. "3" bananen, "1.5" el), for the whole
+   * plan. Null when AH gave no quantity. This is what should be shown to a cook —
+   * grams are an internal bridge for nutrition, not what the recipe was written in.
+   */
+  originalQuantity: number | null;
+  /** The recipe's own unit, e.g. "el", "stuk"; null for a bare count or unknown quantity. */
+  unit: string | null;
+  /** How grams were derived; also picks which unit is shown for this line. */
+  gramsSource: "explicit" | "volume" | "piece" | "spoon" | "fallback";
 }
 
 export interface Plan {
@@ -98,6 +108,9 @@ export function planRecipe(
       productTitle: ing.product?.title ?? null,
       matchScore: ing.matchScore,
       unmatched: !ing.product || Object.keys(ing.product.per100g).length === 0,
+      originalQuantity: ing.raw.quantity !== null ? round((ing.raw.quantity / servings) * portions) : null,
+      unit: ing.raw.unit,
+      gramsSource: ing.gramsSource,
     };
   });
 
@@ -163,6 +176,9 @@ export function planUniform(
       productTitle: ing.product?.title ?? null,
       matchScore: ing.matchScore,
       unmatched: !ing.product || Object.keys(ing.product.per100g).length === 0,
+      originalQuantity: ing.raw.quantity !== null ? round((ing.raw.quantity / servings) * portions) : null,
+      unit: ing.raw.unit,
+      gramsSource: ing.gramsSource,
     };
   });
 

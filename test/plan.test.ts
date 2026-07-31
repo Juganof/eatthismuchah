@@ -127,6 +127,36 @@ describe("planRecipe", () => {
     const plan = planRecipe(matched, [], { portions: 1 });
     for (const i of plan.ingredients) expect(i.scale).toBe(1);
   });
+
+  it("carries the recipe's own quantity and unit through for display", () => {
+    const plan = planRecipe(matched, [], { portions: 1 });
+    const chicken = plan.ingredients.find((i) => i.name === "kipfilet")!;
+    expect(chicken.gramsSource).toBe("explicit");
+    expect(chicken.unit).toBe("g");
+    expect(chicken.originalQuantity).toBeCloseTo(125); // 500 g / 4 servings
+  });
+
+  it("keeps a non-gram quantity in its own unit, not converted to grams", () => {
+    const bananas: ResolvedRecipe = {
+      ...recipe,
+      ingredients: [
+        {
+          raw: { name: "bananen", quantity: 3, unit: null },
+          grams: 360,
+          product: { webshopId: "9", title: "AH Bananen", salesUnitSize: null, per100g: { kcal: 1 } },
+          nutrients: { kcal: 320, protein: 4, carbs: 80, fat: 0.4 },
+          gramsSource: "piece",
+          matchScore: 0.9,
+        },
+      ],
+    };
+    const plan = planRecipe(bananas, [], { portions: 2 });
+    const bananen = plan.ingredients.find((i) => i.name === "bananen")!;
+    // The fixture recipe is for 4 servings; 3 bananen becomes 1.5 for 2 portions.
+    expect(bananen.originalQuantity).toBeCloseTo(1.5);
+    expect(bananen.unit).toBeNull();
+    expect(bananen.gramsSource).toBe("piece");
+  });
 });
 
 describe("buildTargets", () => {
