@@ -10,7 +10,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "db:init": "wrangler d1 execute ah-macro-planner --file=./schema.sql --remote",
-    "db:init:local": "wrangler d1 execute ah-macro-planner --file=./schema.sql --local"
+    "db:init:local": "wrangler d1 execute ah-macro-planner --file=./schema.sql --local",
+    "db:migrate": "wrangler d1 execute ah-macro-planner --file=./migrations/0001_planner.sql --remote",
+    "db:migrate:local": "wrangler d1 execute ah-macro-planner --file=./migrations/0001_planner.sql --local"
   },
   "dependencies": {
     "hono": "^4.6.14"
