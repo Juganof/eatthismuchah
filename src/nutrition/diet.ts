@@ -12,15 +12,24 @@ import type { Recipe } from "../ah/types";
  * werken de momentlabels alleen als voorkeur bij het rangschikken.
  */
 
-/** Inhoudslabels: waar dieetfilters op aangrijpen. */
+/**
+ * Inhoudslabels: waar dieetfilters op aangrijpen.
+ *
+ * Let op de woordgrenzen. Het Nederlands plakt woorden aan elkaar
+ * ("volkorenbrood", "afbakciabatta", "kipgehakt"), dus een `\b` vóór een term
+ * laat precies die samenstellingen door — en dan krijgt iemand die glutenvrij
+ * eet een broodrecept voorgeschoteld. Lange, kenmerkende termen zoeken we
+ * daarom als losse deelstring; alleen bij korte woorden die toevallig in iets
+ * anders kunnen zitten (ei, ham, lam, vis, room) blijft de grens staan.
+ */
 const CONTENT_RULES: [string, RegExp][] = [
-  ["varken", /\b(varken|spek|bacon|ham\b|prosciutto|chorizo|salami|schnitzel|worst)/i],
-  ["vlees", /\b(kip|kalkoen|rund|biefstuk|gehakt|lam\b|varken|spek|bacon|ham\b|worst|salami|chorizo|eend|shoarma|steak|rosbief|schnitzel|kalfs)/i],
-  ["vis", /\b(zalm|tonijn|kabeljauw|garnaal|garnalen|vis\b|haring|makreel|forel|ansjovis|mossel|inktvis|schol|tilapia|krab|sardine)/i],
-  ["zuivel", /\b(melk|kaas|kwark|yoghurt|room|boter|mozzarella|parmezaan|feta|mascarpone|creme fraiche|skyr)/i],
-  ["ei", /\b(ei\b|eieren|eigeel|eiwit\b|omelet)/i],
-  ["noten", /\b(noot|noten|amandel|walnoot|hazelnoot|cashew|pinda|pistache|pecan)/i],
-  ["gluten", /\b(brood|pasta|spaghetti|penne|tarwe|bloem|couscous|bulgur|panko|paneermeel|cracker|wrap|tortilla|noedel|macaroni)/i],
+  ["varken", /(varken|spek|\bbacon|\bham\b|prosciutto|chorizo|salami|schnitzel|worst)/i],
+  ["vlees", /(\bkip|kalkoen|\brund|biefstuk|gehakt|\blam\b|varken|spek|\bbacon|\bham\b|worst|salami|chorizo|\beend\b|shoarma|\bsteak|rosbief|schnitzel|kalfs)/i],
+  ["vis", /(zalm|tonijn|kabeljauw|garnaal|garnalen|\bvis\b|haring|makreel|forel|ansjovis|mossel|inktvis|\bschol\b|tilapia|\bkrab|sardine)/i],
+  ["zuivel", /(melk|\bkaas|kaas\b|kwark|yoghurt|\broom|boter\b|boterm|mozzarella|parmezaan|\bfeta\b|mascarpone|creme fraiche|\bskyr\b|zuivel)/i],
+  ["ei", /(\bei\b|eieren|eigeel|\beiwit\b|omelet)/i],
+  ["noten", /(\bnoot|noten|amandel|walnoot|hazelnoot|cashew|pinda|pistache|pecan)/i],
+  ["gluten", /(brood|pasta|spaghetti|penne|tarwe|bloem|couscous|bulgur|panko|paneermeel|cracker|\bwrap|tortilla|noedel|macaroni|ciabatta|pizza|\bdeeg|beschuit|bagel|lasagne|croissant)/i],
 ];
 
 /** Momentlabels: zoekhints voor de eetmomenten. */
@@ -45,9 +54,23 @@ export const DIETS: Record<string, string[]> = {
   lactosevrij: ["zuivel"],
 };
 
+/**
+ * Woorden die een inhoudslabel zouden opleveren terwijl ze iets anders betekenen.
+ * "kip buiteneieren" is de AH-schrijfwijze voor scharreleieren en is dus géén
+ * vlees; zonder deze stap krijgt een vegetarier dat recept ten onrechte niet.
+ */
+const FALSE_FRIENDS: [RegExp, string][] = [
+  [/\bkip(?:pen)?\s*(?:buiten)?eieren\b/g, "eieren"],
+  [/\bkippenei(?:eren)?\b/g, "eieren"],
+  // Vleesvervangers dragen de naam van het vlees dat ze vervangen.
+  [/\b(?:vega|vegan|vegetarische?)\s+\w+/g, " "],
+];
+
 /** Alles waar we labels uit lezen: titel plus elke ingredientnaam. */
 function searchableText(recipe: Recipe): string {
-  return [recipe.title, ...recipe.ingredients.map((i) => i.name)].join(" ").toLowerCase();
+  let text = [recipe.title, ...recipe.ingredients.map((i) => i.name)].join(" ").toLowerCase();
+  for (const [re, replacement] of FALSE_FRIENDS) text = text.replace(re, replacement);
+  return text;
 }
 
 /** Leidt de labels van een recept af. Draait bij elke opslag, dus houd het goedkoop. */
@@ -56,6 +79,10 @@ export function deriveTags(recipe: Recipe): string[] {
   const tags = new Set<string>();
   for (const [tag, re] of CONTENT_RULES) if (re.test(text)) tags.add(tag);
   for (const [tag, re] of MOMENT_RULES) if (re.test(text)) tags.add(tag);
+  // Varkensvlees is vlees. Dat afleiden in plaats van elke varkensterm ook in de
+  // vleeslijst te herhalen, want die twee lijsten lopen gegarandeerd uit elkaar
+  // — "prosciutto" stond al alleen in de eerste.
+  if (tags.has("varken")) tags.add("vlees");
   return [...tags];
 }
 

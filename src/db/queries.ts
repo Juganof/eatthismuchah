@@ -412,6 +412,187 @@ export class Store {
     return row?.n ?? 0;
   }
 
+  // ------------------------------------------------------------- overzichten
+
+  /**
+   * Alle recepten met hun voedingswaarde, voor de overzichtspagina. Een recept
+   * zonder doorgerekende voeding hoort er juist wél bij te staan — dat is precies
+   * wat je wilt zien als je je afvraagt waarom iets niet in een dagmenu opduikt.
+   */
+  async listRecipes(options: BrowseOptions = {}): Promise<BrowseResult<RecipeRow>> {
+    const { query = "", limit = 100, offset = 0 } = options;
+    const where = query ? "WHERE LOWER(r.title) LIKE ?" : "";
+    const params = query ? [`%${query.toLowerCase()}%`] : [];
+
+    const total = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM recipes r ${where}`)
+      .bind(...params)
+      .first<{ n: number }>();
+
+    const { results } = await this.db
+      .prepare(
+        `SELECT r.id, r.title, r.url, r.servings, r.tags, r.fetched_at, r.first_seen_at,
+                json_array_length(r.ingredients) AS ingredient_count,
+                n.kcal, n.protein, n.carbs, n.fat, n.fiber, n.coverage,
+                COALESCE(p.status, '') AS pref_status
+         FROM recipes r
+         LEFT JOIN recipe_nutrition n ON n.recipe_id = r.id
+         LEFT JOIN recipe_prefs p ON p.recipe_id = r.id
+         ${where}
+         ORDER BY r.fetched_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(...params, limit, offset)
+      .all<Record<string, unknown>>();
+
+    return {
+      total: total?.n ?? 0,
+      rows: (results ?? []).map((r) => ({
+        id: String(r["id"]),
+        title: String(r["title"]),
+        url: String(r["url"]),
+        servings: Number(r["servings"]),
+        tags: parseJson<string[]>(r["tags"] as string | null, []),
+        ingredientCount: Number(r["ingredient_count"] ?? 0),
+        fetchedAt: Number(r["fetched_at"]),
+        firstSeenAt: r["first_seen_at"] === null ? null : Number(r["first_seen_at"]),
+        prefStatus: String(r["pref_status"] ?? ""),
+        // Null betekent hier "nog niet doorgerekend", niet "nul calorieen".
+        nutrition:
+          r["kcal"] === null || r["kcal"] === undefined
+            ? null
+            : {
+                kcal: Number(r["kcal"]),
+                protein: Number(r["protein"]),
+                carbs: Number(r["carbs"]),
+                fat: Number(r["fat"]),
+                fiber: Number(r["fiber"]),
+              },
+        coverage: r["coverage"] === null || r["coverage"] === undefined ? null : Number(r["coverage"]),
+      })),
+    };
+  }
+
+  /** Producten met hun voedingswaarde en, waar bekend, de ingredienten die erop matchen. */
+  async listProducts(options: BrowseOptions = {}): Promise<BrowseResult<ProductRow>> {
+    const { query = "", limit = 100, offset = 0 } = options;
+    const where = query ? "WHERE LOWER(p.title) LIKE ?" : "";
+    const params = query ? [`%${query.toLowerCase()}%`] : [];
+
+    const total = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM products p ${where}`)
+      .bind(...params)
+      .first<{ n: number }>();
+
+    const { results } = await this.db
+      .prepare(
+        `SELECT p.webshop_id, p.title, p.sales_unit_size, p.per_100g, p.fetched_at,
+                (SELECT COUNT(*) FROM ingredient_matches m WHERE m.webshop_id = p.webshop_id) AS match_count,
+                (SELECT GROUP_CONCAT(m.ingredient_name, ', ') FROM ingredient_matches m
+                  WHERE m.webshop_id = p.webshop_id) AS matched_names
+         FROM products p
+         ${where}
+         ORDER BY match_count DESC, p.title ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(...params, limit, offset)
+      .all<Record<string, unknown>>();
+
+    return {
+      total: total?.n ?? 0,
+      rows: (results ?? []).map((r) => ({
+        webshopId: String(r["webshop_id"]),
+        title: String(r["title"]),
+        salesUnitSize: (r["sales_unit_size"] as string | null) ?? null,
+        per100g: parseJson<Nutrients>(r["per_100g"] as string, {}),
+        fetchedAt: Number(r["fetched_at"]),
+        matchCount: Number(r["match_count"] ?? 0),
+        matchedNames: r["matched_names"] ? String(r["matched_names"]) : "",
+      })),
+    };
+  }
+
+  /** Ingredientnamen en het product waaraan ze gekoppeld zijn, inclusief de missers. */
+  async listMatches(options: BrowseOptions = {}): Promise<BrowseResult<MatchRow>> {
+    const { query = "", limit = 200, offset = 0 } = options;
+    const where = query ? "WHERE LOWER(m.ingredient_name) LIKE ?" : "";
+    const params = query ? [`%${query.toLowerCase()}%`] : [];
+
+    const total = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM ingredient_matches m ${where}`)
+      .bind(...params)
+      .first<{ n: number }>();
+
+    const { results } = await this.db
+      .prepare(
+        `SELECT m.ingredient_name, m.webshop_id, m.score, m.matched_at, p.title AS product_title
+         FROM ingredient_matches m
+         LEFT JOIN products p ON p.webshop_id = m.webshop_id
+         ${where}
+         ORDER BY (m.webshop_id IS NULL) DESC, m.score ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(...params, limit, offset)
+      .all<Record<string, unknown>>();
+
+    return {
+      total: total?.n ?? 0,
+      rows: (results ?? []).map((r) => ({
+        ingredientName: String(r["ingredient_name"]),
+        webshopId: (r["webshop_id"] as string | null) ?? null,
+        productTitle: (r["product_title"] as string | null) ?? null,
+        score: Number(r["score"]),
+        matchedAt: Number(r["matched_at"]),
+      })),
+    };
+  }
+
+  /** Het scrape-archief, zonder de payload zelf — die kan megabytes groot zijn. */
+  async listScrapes(options: BrowseOptions = {}): Promise<BrowseResult<ScrapeRow>> {
+    const { query = "", limit = 100, offset = 0 } = options;
+    const where = query ? "WHERE kind = ?" : "";
+    const params = query ? [query] : [];
+
+    const total = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM scrape_raw ${where}`)
+      .bind(...params)
+      .first<{ n: number }>();
+
+    const { results } = await this.db
+      .prepare(
+        `SELECT id, kind, ref, url, status, parsed_ok, parse_error, scraped_at,
+                length(body) AS body_bytes
+         FROM scrape_raw ${where}
+         ORDER BY scraped_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(...params, limit, offset)
+      .all<Record<string, unknown>>();
+
+    return {
+      total: total?.n ?? 0,
+      rows: (results ?? []).map((r) => ({
+        id: String(r["id"]),
+        kind: String(r["kind"]),
+        ref: String(r["ref"]),
+        url: String(r["url"]),
+        status: Number(r["status"]),
+        parsedOk: Number(r["parsed_ok"]) === 1,
+        parseError: (r["parse_error"] as string | null) ?? null,
+        scrapedAt: Number(r["scraped_at"]),
+        bodyBytes: Number(r["body_bytes"] ?? 0),
+      })),
+    };
+  }
+
+  /** De ruwe payload van één archiefregel, voor als je wilt zien wat AH stuurde. */
+  async getRawById(id: string): Promise<{ id: string; kind: string; url: string; body: string } | null> {
+    return await this.db
+      .prepare("SELECT id, kind, url, body FROM scrape_raw WHERE id = ?")
+      .bind(id)
+      .first<{ id: string; kind: string; url: string; body: string }>();
+  }
+
   // ---------------------------------------------------------------- profiel
 
   /** Er is precies één profiel; ontbreekt het, dan geldt het standaardprofiel. */
@@ -631,6 +812,64 @@ export class Store {
 }
 
 // ------------------------------------------------------------------- types
+
+export interface BrowseOptions {
+  /** Vrije zoekterm; bij scrapes is dit de soort in plaats van een tekstfilter. */
+  query?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface BrowseResult<T> {
+  /** Totaal aantal rijen dat aan het filter voldoet, los van limit. */
+  total: number;
+  rows: T[];
+}
+
+export interface RecipeRow {
+  id: string;
+  title: string;
+  url: string;
+  servings: number;
+  tags: string[];
+  ingredientCount: number;
+  fetchedAt: number;
+  firstSeenAt: number | null;
+  prefStatus: string;
+  /** Null zolang het recept nog niet is doorgerekend. */
+  nutrition: Nutrients | null;
+  coverage: number | null;
+}
+
+export interface ProductRow {
+  webshopId: string;
+  title: string;
+  salesUnitSize: string | null;
+  per100g: Nutrients;
+  fetchedAt: number;
+  matchCount: number;
+  matchedNames: string;
+}
+
+export interface MatchRow {
+  ingredientName: string;
+  webshopId: string | null;
+  productTitle: string | null;
+  score: number;
+  matchedAt: number;
+}
+
+export interface ScrapeRow {
+  id: string;
+  kind: string;
+  ref: string;
+  url: string;
+  status: number;
+  parsedOk: boolean;
+  parseError: string | null;
+  scrapedAt: number;
+  bodyBytes: number;
+}
 
 export interface SlotShortlistOptions {
   /** Doel-kcal per portie voor dit moment; bepaalt de band en de sortering. */

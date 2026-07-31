@@ -70,16 +70,19 @@ function macroChips(n) {
 // ------------------------------------------------------------------- tabs
 
 function selectTab(name) {
-  document.querySelectorAll(".tab").forEach((tab) => {
+  // Scoped op #mainTabs: het database-tabblad heeft binnenin zijn eigen tabbalk
+  // met dezelfde class, en die hoort geen panelen om te schakelen.
+  document.querySelectorAll("#mainTabs .tab").forEach((tab) => {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   });
   document.querySelectorAll(".panel").forEach((panel) => {
     panel.hidden = panel.id !== "panel-" + name;
   });
   if (name === "week") loadWeek();
+  if (name === "database") loadBrowse();
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll("#mainTabs .tab").forEach((tab) => {
   tab.onclick = () => selectTab(tab.dataset.tab);
 });
 
@@ -382,6 +385,121 @@ $("shoppingList").onclick = () => run($("shoppingList"), async () => {
   }).join("");
   $("shoppingOut").innerHTML = '<div class="card"><h2>Boodschappen (' + data.days + ' dagen)</h2>' + rows + '</div>';
 });
+
+// ---------------------------------------------------------- database
+
+const browse = { kind: "recipes", offset: 0, limit: 50, total: 0 };
+
+const when = (ms) => (ms ? new Date(ms).toLocaleDateString("nl-NL") : "-");
+// Onder een kilobyte afronden zou elke kleine payload "0 kB" maken.
+const kib = (bytes) => (bytes < 1024 ? bytes + " B" : Math.round(bytes / 1024) + " kB");
+const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+
+function browseRecipe(r) {
+  const macros = r.nutrition
+    ? g(r.nutrition.kcal) + ' kcal &middot; ' + g(r.nutrition.protein) + 'g eiwit'
+      + ' &middot; dekking ' + Math.round((r.coverage || 0) * 100) + '%'
+    : '<span class="warnish">nog niet doorgerekend</span>';
+  const flag = r.prefStatus === "fav" ? ' &#9829;' : (r.prefStatus === "blocked" ? ' &#9940;' : '');
+  const tags = r.tags.length ? r.tags.map((t) => '<span class="macro">' + escapeHtml(t) + '</span>').join("") : '<span class="macro">geen labels</span>';
+  return '<div class="card">'
+    + '<strong><a href="' + r.url + '" target="_blank" rel="noopener">' + escapeHtml(r.title) + '</a></strong>' + flag
+    + '<p class="muted" style="margin:4px 0">' + macros + '</p>'
+    + '<div class="macros">' + tags + '</div>'
+    + '<p class="muted" style="margin:4px 0">' + plural(r.ingredientCount, "ingredient", "ingredienten")
+    + ' &middot; ' + plural(r.servings, "portie", "porties")
+    + ' &middot; opgehaald ' + when(r.fetchedAt) + '</p>'
+    + '</div>';
+}
+
+function browseProduct(p) {
+  const n = p.per100g || {};
+  const known = Object.keys(n).length > 0;
+  return '<div class="card">'
+    + '<strong><a href="https://www.ah.nl/producten/product/wi' + encodeURIComponent(p.webshopId)
+    + '" target="_blank" rel="noopener">' + escapeHtml(p.title) + '</a></strong>'
+    + '<p class="muted" style="margin:4px 0">' + escapeHtml(p.salesUnitSize || "onbekende verpakking") + '</p>'
+    + (known ? macroChips(n) : '<p class="note">geen voedingswaarde bekend</p>')
+    + '<p class="muted" style="margin:4px 0">gekoppeld aan ' + plural(p.matchCount, "ingredient", "ingredienten")
+    + (p.matchedNames ? ': ' + escapeHtml(p.matchedNames) : '') + '</p>'
+    + '</div>';
+}
+
+function browseMatch(m) {
+  const target = m.webshopId
+    ? '<a href="https://www.ah.nl/producten/product/wi' + encodeURIComponent(m.webshopId)
+      + '" target="_blank" rel="noopener">' + escapeHtml(m.productTitle || m.webshopId) + '</a>'
+    : '<span class="warnish">geen product gevonden</span>';
+  return '<div class="row"><span>' + escapeHtml(m.ingredientName) + ' &rarr; ' + target + '</span>'
+    + '<span class="amt">' + (m.webshopId ? Math.round(m.score * 100) + '%' : '') + '</span></div>';
+}
+
+function browseScrape(s) {
+  const state = s.parsedOk
+    ? '<span class="ok">geparsed</span>'
+    : '<span class="warnish">' + escapeHtml(s.parseError || "nog niet geparsed") + '</span>';
+  return '<div class="row"><span>'
+    + '<a href="/api/browse/raw/' + encodeURIComponent(s.id) + '" target="_blank" rel="noopener">'
+    + escapeHtml(s.kind) + ' &middot; ' + escapeHtml(s.ref) + '</a><br>'
+    + '<span class="muted">HTTP ' + s.status + ' &middot; ' + kib(s.bodyBytes) + ' &middot; ' + when(s.scrapedAt)
+    + ' &middot; ' + state + '</span></span></div>';
+}
+
+async function loadBrowse() {
+  try {
+    const params = "?q=" + encodeURIComponent($("browseQuery").value)
+      + "&limit=" + browse.limit + "&offset=" + browse.offset;
+    const data = await api("/api/browse/" + browse.kind + params);
+    browse.total = data.total;
+
+    const from = data.total === 0 ? 0 : browse.offset + 1;
+    $("browseCount").textContent = from + "-" + (browse.offset + data.rows.length) + " van " + data.total;
+    $("browsePrev").disabled = browse.offset === 0;
+    $("browseNext").disabled = browse.offset + browse.limit >= data.total;
+
+    if (data.rows.length === 0) {
+      $("browseOut").innerHTML = '<div class="card"><p class="muted">Niets gevonden.</p></div>';
+      return;
+    }
+    // Recepten en producten krijgen een kaart per stuk; de andere twee zijn
+    // lijsten waarvan je er veel tegelijk wilt kunnen scannen.
+    if (browse.kind === "recipes") $("browseOut").innerHTML = data.rows.map(browseRecipe).join("");
+    else if (browse.kind === "products") $("browseOut").innerHTML = data.rows.map(browseProduct).join("");
+    else if (browse.kind === "matches") $("browseOut").innerHTML = '<div class="card">' + data.rows.map(browseMatch).join("") + '</div>';
+    else $("browseOut").innerHTML = '<div class="card">' + data.rows.map(browseScrape).join("") + '</div>';
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+document.querySelectorAll(".browse-kind").forEach((button) => {
+  button.onclick = () => {
+    browse.kind = button.dataset.kind;
+    browse.offset = 0;
+    document.querySelectorAll(".browse-kind").forEach((b) => {
+      b.setAttribute("aria-selected", String(b === button));
+    });
+    loadBrowse();
+  };
+});
+
+let browseTimer = null;
+$("browseQuery").oninput = () => {
+  // Wachten tot je uitgetypt bent; anders vuurt elke toetsaanslag een query af.
+  clearTimeout(browseTimer);
+  browseTimer = setTimeout(() => { browse.offset = 0; loadBrowse(); }, 300);
+};
+
+$("browsePrev").onclick = () => {
+  browse.offset = Math.max(0, browse.offset - browse.limit);
+  loadBrowse();
+};
+$("browseNext").onclick = () => {
+  if (browse.offset + browse.limit < browse.total) {
+    browse.offset += browse.limit;
+    loadBrowse();
+  }
+};
 
 // --------------------------------------------------------------- beheer
 

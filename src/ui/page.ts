@@ -1,4 +1,4 @@
-import { adminCard, dayTab, profileTab, slotsTab, weekTab } from "./markup";
+import { adminCard, browseTab, dayTab, profileTab, slotsTab, weekTab } from "./markup";
 import { script } from "./script";
 import { styles } from "./styles";
 
@@ -26,11 +26,12 @@ export function renderPage(): string {
   <h1>AH Macro Planner</h1>
   <p class="sub">Allerhande-recepten, herberekend naar jouw macro's.</p>
 
-  <div class="tabs" role="tablist">
+  <div class="tabs" id="mainTabs" role="tablist">
     <button class="tab" role="tab" data-tab="profiel" aria-selected="true">Profiel</button>
     <button class="tab" role="tab" data-tab="momenten" aria-selected="false">Eetmomenten</button>
     <button class="tab" role="tab" data-tab="dag" aria-selected="false">Dag</button>
     <button class="tab" role="tab" data-tab="week" aria-selected="false">Week</button>
+    <button class="tab" role="tab" data-tab="database" aria-selected="false">Database</button>
   </div>
 
   <div id="toast"></div>
@@ -39,6 +40,7 @@ ${profileTab()}
 ${slotsTab()}
 ${dayTab()}
 ${weekTab()}
+${browseTab()}
 ${adminCard()}
 </main>
 <script>${script}</script>

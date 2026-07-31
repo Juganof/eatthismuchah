@@ -77,6 +77,10 @@ export const styles = `
   .macro.good b { color: var(--ok); }
 
   .note { font-size: .78rem; color: var(--warn); margin-top: 8px; }
+  /* Voor waarschuwende tekst midden in een regel, waar .note te veel marge geeft. */
+  .warnish { color: var(--warn); }
+  #browseQuery { margin-top: 4px; }
+  #browseOut .row a { text-decoration: none; }
   .muted { color: var(--muted); font-size: .8rem; }
   .ok { color: var(--ok); }
   a { color: var(--accent); }

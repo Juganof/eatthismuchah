@@ -38,6 +38,21 @@ function clientFor(env: Env, ctx?: Waiter): AhClient {
 
 const storeFor = (env: Env) => new Store(env.DB);
 
+/**
+ * Zonder dit antwoordt Hono op een onverwachte fout met platte tekst, en dan
+ * toont de UI alleen "geen geldige respons" — precies als je wilt weten wat er
+ * mis is. Een ontbrekende kolom na een overgeslagen migratie is zo'n geval, dus
+ * de melding wijst daar ook naar.
+ */
+app.onError((err, c) => {
+  const message = err instanceof Error ? err.message : String(err);
+  const hint = /no such column|no such table|D1_ERROR/i.test(message)
+    ? " — draai de migratie: npm run db:migrate"
+    : "";
+  console.error("unhandled:", message);
+  return c.json({ error: message + hint }, 500);
+});
+
 app.get("/", (c) => c.html(renderPage()));
 
 /** Reports which ah.nl endpoints still work. First stop when results go empty. */
@@ -68,14 +83,24 @@ app.get("/api/search", async (c) => {
   const client = clientFor(c.env, c.executionCtx);
   const recipes = await client.searchRecipes(q, Number(c.req.query("size") ?? 20));
 
-  for (const stub of recipes) await store.putRecipe(stub);
+  // Per stuk afvangen: één recept dat niet wegschrijft mag de zoekopdracht niet
+  // laten mislukken, want het resultaat is verder gewoon bruikbaar.
+  const saveErrors: string[] = [];
+  for (const stub of recipes) {
+    try {
+      await store.putRecipe(stub);
+    } catch (err) {
+      saveErrors.push(`${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // Het doorrekenen doet een productzoekopdracht per nieuw ingredient, dus dat
   // mag de zoekopdracht niet ophouden.
   c.executionCtx?.waitUntil(hydrate(c.env, recipes.map((r) => r.id)));
 
   return c.json({
     recipes: recipes.map(({ id, title, url, imageUrl }) => ({ id, title, url, imageUrl })),
-    saved: recipes.length,
+    saved: recipes.length - saveErrors.length,
+    ...(saveErrors.length > 0 ? { errors: saveErrors } : {}),
   });
 });
 
@@ -464,6 +489,43 @@ app.get("/api/shopping", async (c) => {
   return c.json({ days: days.length, lines });
 });
 
+// --------------------------------------------------------------- overzichten
+
+/** Leest de pagineringsparameters die elk overzicht deelt. */
+function browseParams(c: { req: { query: (k: string) => string | undefined } }) {
+  const limit = Number(c.req.query("limit") ?? 100);
+  const offset = Number(c.req.query("offset") ?? 0);
+  return {
+    query: c.req.query("q") ?? "",
+    // Een ongelimiteerde dump zou de worker over zijn geheugen jagen.
+    limit: Number.isFinite(limit) ? Math.min(Math.max(1, limit), 500) : 100,
+    offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+  };
+}
+
+app.get("/api/browse/recipes", async (c) =>
+  c.json(await storeFor(c.env).listRecipes(browseParams(c))),
+);
+
+app.get("/api/browse/products", async (c) =>
+  c.json(await storeFor(c.env).listProducts(browseParams(c))),
+);
+
+app.get("/api/browse/matches", async (c) =>
+  c.json(await storeFor(c.env).listMatches(browseParams(c))),
+);
+
+app.get("/api/browse/scrapes", async (c) =>
+  c.json(await storeFor(c.env).listScrapes(browseParams(c))),
+);
+
+/** De ruwe payload van één archiefregel, als platte tekst. */
+app.get("/api/browse/raw/:id", async (c) => {
+  const row = await storeFor(c.env).getRawById(c.req.param("id"));
+  if (!row) return c.json({ error: "archiefregel niet gevonden" }, 404);
+  return c.text(row.body, 200, { "Content-Type": "text/plain; charset=utf-8" });
+});
+
 // ------------------------------------------------- voorkeuren en uitsluitingen
 
 app.get("/api/prefs", async (c) => c.json({ prefs: await storeFor(c.env).listPrefs() }));
@@ -577,8 +639,15 @@ async function ingest(env: Env, queries: string[], limit: number) {
 
     // Zoekresultaten dragen geen ingredienten, maar wel titel en id. Die eerst
     // wegschrijven: valt het ophalen van de detailpagina daarna om, dan weten we
-    // in elk geval nog dat dit recept bestaat.
-    for (const stub of found) await store.putRecipe(stub);
+    // in elk geval nog dat dit recept bestaat. Per stuk afvangen, want één
+    // onopslaanbaar recept mag de hele ingest niet laten klappen.
+    for (const stub of found) {
+      try {
+        await store.putRecipe(stub);
+      } catch (err) {
+        errors.push(`opslaan ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     for (const stub of found) {
       if (added >= limit) break;

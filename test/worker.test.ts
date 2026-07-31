@@ -64,6 +64,30 @@ describe("Worker routes", () => {
     expect(match.status).toBe(400);
   });
 
+  it("answers a database failure with readable JSON, not a bare 500", async () => {
+    // Dit is wat er live gebeurde toen de migratie nog niet gedraaid was: D1
+    // gooide op een ontbrekende kolom, Hono antwoordde met platte tekst, en de
+    // UI kon daar alleen "geen geldige respons" van maken.
+    const brokenDb = {
+      prepare: () => {
+        throw new Error("D1_ERROR: no such column: first_seen_at");
+      },
+    } as unknown as D1Database;
+
+    const response = await worker.fetch(
+      new Request("https://worker.test/api/stats"),
+      { ...env, DB: brokenDb },
+      ctx,
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("no such column");
+    // en de melding wijst naar de oplossing
+    expect(body.error).toContain("db:migrate");
+  });
+
   it("explains that ingest is required before generation", async () => {
     const response = await fetchWorker("/api/generate", {
       method: "POST",

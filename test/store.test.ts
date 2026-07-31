@@ -66,6 +66,26 @@ describe("recipe storage", () => {
     expect(after?.title).toBe("Kip met rijst en broccoli");
   });
 
+  it("does not read free-range eggs as chicken meat", async () => {
+    const store = freshStore();
+    // AH schrijft scharreleieren als "kip buiteneieren". Zonder correctie leest
+    // de tagger daar vlees in en krijgt een vegetarier dit recept nooit te zien.
+    await store.putRecipe(
+      recipe({
+        id: "R-R2",
+        title: "Panzanella met gegrilde groente en ei",
+        ingredients: [{ name: "kip buiteneieren", quantity: 6, unit: "stuk" }],
+      }),
+    );
+    const row = await db!
+      .prepare("SELECT tags FROM recipes WHERE id = 'R-R2'")
+      .first<{ tags: string }>();
+
+    const tags = JSON.parse(row!.tags) as string[];
+    expect(tags).toContain("ei");
+    expect(tags).not.toContain("vlees");
+  });
+
   it("derives tags so the diet filter has something to work with", async () => {
     const store = freshStore();
     await store.putRecipe(recipe());

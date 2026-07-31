@@ -128,6 +128,29 @@ export function weekTab(): string {
 </section>`;
 }
 
+/** Database: alles wat er is, om in te kunnen kijken. */
+export function browseTab(): string {
+  return `
+<section class="panel" id="panel-database" hidden>
+  <div class="card">
+    <h2>Wat zit er in de database?</h2>
+    <div class="tabs" id="browseKinds" role="tablist">
+      <button class="tab browse-kind" data-kind="recipes" aria-selected="true">Recepten</button>
+      <button class="tab browse-kind" data-kind="products" aria-selected="false">Producten</button>
+      <button class="tab browse-kind" data-kind="matches" aria-selected="false">Koppelingen</button>
+      <button class="tab browse-kind" data-kind="scrapes" aria-selected="false">Scrape-archief</button>
+    </div>
+    <input id="browseQuery" type="search" placeholder="zoeken in dit overzicht&hellip;">
+    <div class="actions">
+      <button class="secondary small" id="browsePrev">&larr; vorige</button>
+      <button class="secondary small" id="browseNext">volgende &rarr;</button>
+      <span class="muted" id="browseCount" style="align-self:center"></span>
+    </div>
+  </div>
+  <div id="browseOut"></div>
+</section>`;
+}
+
 /** Beheer: scrapen, archief en diagnose. */
 export function adminCard(): string {
   return `
