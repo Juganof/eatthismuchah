@@ -20,6 +20,31 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 let lastRequestAt = 0;
 
+/**
+ * De JSON-zoekdienst van Allerhande gaf in de praktijk 404 op élke aanroep, en
+ * dan alsnog de HTML-pagina ophalen kost twee verzoeken in plaats van één. Uit
+ * een budget van veertig is dat te duur om per zoekterm te herhalen, dus na de
+ * eerste misser slaat de rest van dit isolate hem over.
+ */
+let recipeSearchJsonDead = false;
+
+/**
+ * Een worker mag maar een beperkt aantal uitgaande verzoeken doen per aanroep
+ * (op het gratis plan 50). Ging dat op, dan brak Cloudflare de ronde midden in
+ * een recept af met "Too many subrequests" — een fout per resterend recept, en
+ * geen enkele aanwijzing dat het aan óns budget lag en niet aan AH. De client
+ * telt daarom zelf mee en stopt netjes vóór de grens.
+ */
+export class SubrequestBudgetError extends Error {
+  constructor(public readonly used: number) {
+    super(`subrequest-budget bereikt na ${used} verzoeken aan ah.nl`);
+    this.name = "SubrequestBudgetError";
+  }
+}
+
+export const isBudgetError = (err: unknown): err is SubrequestBudgetError =>
+  err instanceof SubrequestBudgetError || /subrequest/i.test(err instanceof Error ? err.message : "");
+
 /** Wat er gescraped werd, zodat het archief doorzoekbaar blijft per soort. */
 export type ScrapeKind = "recipe" | "recipe_search" | "product" | "product_search";
 
@@ -49,17 +74,33 @@ export class AhClient {
   private readonly minIntervalMs: number;
   private readonly maxRetries: number;
   private readonly backoffMs: number;
+  private readonly maxRequests: number;
+  /** Verzoeken die deze client gedaan heeft; de teller achter het budget. */
+  private requests = 0;
 
   constructor(
     private readonly userAgent: string,
     private readonly onRaw?: (raw: RawScrape) => void,
-    options: { minIntervalMs?: number; maxRetries?: number; backoffMs?: number } = {},
+    options: {
+      minIntervalMs?: number;
+      maxRetries?: number;
+      backoffMs?: number;
+      maxRequests?: number;
+    } = {},
   ) {
     // 700 ms is genoeg om onder de botbescherming te blijven en houdt een ingest
     // van 20 recepten nog binnen een halve minuut. In tests staat het op 0.
     this.minIntervalMs = options.minIntervalMs ?? 700;
     this.maxRetries = options.maxRetries ?? 2;
     this.backoffMs = options.backoffMs ?? 1500;
+    // 40 is de veilige marge onder de 50 van het gratis plan: er moeten ook nog
+    // een auth-aanroep en de laatste herkansingen in passen.
+    this.maxRequests = options.maxRequests ?? 40;
+  }
+
+  /** Hoeveel verzoeken deze client al gedaan heeft, en hoeveel er nog mogen. */
+  get budget(): { used: number; max: number } {
+    return { used: this.requests, max: this.maxRequests };
   }
 
   private record(raw: RawScrape): void {
@@ -122,6 +163,8 @@ export class AhClient {
    * en een herkansing met oplopende wachttijd als het tóch misgaat.
    */
   private async pace(): Promise<void> {
+    if (this.requests >= this.maxRequests) throw new SubrequestBudgetError(this.requests);
+    this.requests++;
     const wait = this.minIntervalMs - (Date.now() - lastRequestAt);
     if (wait > 0) await sleep(wait);
     lastRequestAt = Date.now();
@@ -194,6 +237,23 @@ export class AhClient {
     return { ...stub, webshopId, per100g };
   }
 
+  /**
+   * Alleen de voedingswaarde per 100 g, van de server-rendered productpagina.
+   *
+   * De v4-detailaanroep levert die sinds 2026 niet meer, dus die is voor een
+   * product uit een zoekresultaat pure verspilling: titel en verpakking staan al
+   * in het zoekresultaat, en de voedingswaarde komt tóch van de HTML-pagina.
+   * Twee verzoeken per product werd er zo één — bij een recept met vijftien
+   * ingredienten scheelt dat vijftien verzoeken uit een budget van veertig.
+   */
+  async getProductNutrition(webshopId: string): Promise<Nutrients> {
+    const html = await this.htmlGet(`${PRODUCT_PAGE_URL}${encodeURIComponent(webshopId)}`, {
+      kind: "product",
+      ref: webshopId,
+    });
+    return parseNutritionHtml(html);
+  }
+
   // ----------------------------------------------------------------- recipes
 
   /**
@@ -202,12 +262,16 @@ export class AhClient {
    */
   async searchRecipes(query: string, size = 20): Promise<Recipe[]> {
     const jsonUrl = `${RECIPE_BASE}/service/search/recipes?searchTerm=${encodeURIComponent(query)}&size=${size}`;
-    try {
-      const body = await this.apiGet(jsonUrl, { kind: "recipe_search", ref: query });
-      const found = collectRecipes(body);
-      if (found.length > 0) return found.slice(0, size);
-    } catch {
-      // fall through to HTML
+    if (!recipeSearchJsonDead) {
+      try {
+        const body = await this.apiGet(jsonUrl, { kind: "recipe_search", ref: query });
+        const found = collectRecipes(body);
+        if (found.length > 0) return found.slice(0, size);
+        recipeSearchJsonDead = true;
+      } catch (err) {
+        if (err instanceof SubrequestBudgetError) throw err;
+        recipeSearchJsonDead = true;
+      }
     }
     const html = await this.htmlGet(
       `${RECIPE_BASE}/recepten-zoeken?query=${encodeURIComponent(query)}`,

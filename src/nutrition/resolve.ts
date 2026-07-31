@@ -66,10 +66,17 @@ export async function lookupIngredientMatch(
     return { outcome: "no-match", product: null, score: 0 };
   }
 
-  // Search results carry no nutrition, so fetch the detail record.
+  // Het zoekresultaat draagt titel en verpakking al; alleen de voedingswaarde
+  // ontbreekt, en die komt van de productpagina. Eén verzoek dus, geen twee.
   let full = await store.getProduct(match.product.webshopId);
   if (!full) {
-    full = await client.getProduct(match.product.webshopId);
+    const per100g = await client.getProductNutrition(match.product.webshopId);
+    full = per100g.kcal !== undefined
+      ? { ...match.product, per100g }
+      // Staat er niets op de pagina, dan alsnog de detail-API proberen: die
+      // leverde de voedingswaarde vroeger wel, en als AH dat herstelt willen we
+      // niet vastzitten aan de dure route.
+      : await client.getProduct(match.product.webshopId);
     if (full) await store.putProduct(full);
   }
   // Geen bruikbaar productdetail: niet als negatieve match onthouden, want dit is

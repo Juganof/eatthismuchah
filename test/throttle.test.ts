@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AhClient, type RawScrape } from "../src/ah/client";
+import { AhClient, SubrequestBudgetError, type RawScrape } from "../src/ah/client";
 
 /**
  * ah.nl staat achter Akamai's botbescherming. Uit het scrape-archief van de
@@ -94,5 +94,21 @@ describe("pacing", () => {
     await new AhClient("test", undefined, { minIntervalMs: 120 }).getRecipe("R-R2");
 
     expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+  });
+});
+
+describe("verzoekbudget", () => {
+  it("stopt met een eigen fout in plaats van door Cloudflare afgekapt te worden", async () => {
+    const fetchMock = vi.fn(async () => new Response("<html></html>", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AhClient("test", undefined, { minIntervalMs: 0, maxRequests: 2 });
+    await client.getRecipe("R-R1");
+    await client.getRecipe("R-R2");
+
+    await expect(client.getRecipe("R-R3")).rejects.toThrow(SubrequestBudgetError);
+    expect(client.budget).toEqual({ used: 2, max: 2 });
+    // Precies twee verzoeken: de derde is er nooit uit gegaan.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

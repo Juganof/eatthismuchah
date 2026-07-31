@@ -255,6 +255,16 @@ de ingebouwde paginastate in plaats van naar CSS-selectors — maar als resultat
 blijven, vraag dan eerst `GET /api/probe` op: die zegt welke stap stuk is. Daarna is
 `POST /api/reparse` je vangnet.
 
+**Een worker mag maar een beperkt aantal verzoeken doen per aanroep.** Op het gratis
+plan zijn dat er 50, en die grens is makkelijker te raken dan hij klinkt: één recept
+met vijftien ingrediënten kostte vroeger dertig productlookups, waarna Cloudflare de
+hele ronde afkapte met "Too many subrequests" en élk resterend recept faalde. Daarom
+telt de scraper zijn verzoeken zelf mee (`AUTO_MAX_REQUESTS`, standaard 40) en stopt
+hij netjes vóór de grens. Het werk is bovendien over rondes verdeeld: ingesten kost
+één verzoek per recept en doet geen productlookups, koppelen gebeurt in de
+enrichment-ronde, en het opnieuw optellen van recepttotalen gebeurt volledig uit de
+database.
+
 **ah.nl remt je af, en dat merk je aan lege recepten.** De site staat achter Akamai's
 botbescherming, die op tempo reageert en niet op aantallen: drie receptpagina's binnen
 een tiende seconde leveren 403's op, terwijl dezelfde pagina's rustig achter elkaar

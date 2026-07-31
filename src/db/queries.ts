@@ -559,6 +559,38 @@ export class Store {
          )`;
   }
 
+  /**
+   * Recepten waarvan het opgeslagen totaal niet meer klopt met wat we inmiddels
+   * weten: er zijn ingredienten aan producten gekoppeld, maar de voedingswaarde
+   * staat nog op de dekking van bij binnenkomst. AH's eigen cijfers blijven
+   * buiten schot — die zijn beter dan onze optelsom en worden niet herrekend.
+   */
+  async recipesNeedingRecompute(limit: number): Promise<string[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT r.id FROM recipes r
+         LEFT JOIN recipe_nutrition n ON n.recipe_id = r.id
+         WHERE json_array_length(r.ingredients) > 0
+           AND COALESCE(n.source, 'products') <> 'ah'
+           AND ${Store.HAS_REAL_INGREDIENT_NUTRITION}
+           -- Alleen als er ná de vorige berekening nog een koppeling bij kwam;
+           -- anders zou dezelfde optelsom elke ronde opnieuw gemaakt worden.
+           AND (
+             n.recipe_id IS NULL
+             OR EXISTS (
+               SELECT 1 FROM json_each(r.ingredients) ing
+               JOIN ingredient_matches m ON m.ingredient_name = json_extract(ing.value, '$.name')
+               WHERE m.matched_at >= n.computed_at
+             )
+           )
+         ORDER BY COALESCE(n.computed_at, 0) ASC
+         LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ id: string }>();
+    return (results ?? []).map((r) => r.id);
+  }
+
   async countUnusableRecipes(graceMs: number): Promise<number> {
     const row = await this.db
       .prepare(`SELECT COUNT(*) AS n FROM (${this.unusableRecipeIdsQuery()})`)

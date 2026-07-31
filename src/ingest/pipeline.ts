@@ -1,4 +1,4 @@
-import { AhClient } from "../ah/client";
+import { AhClient, isBudgetError } from "../ah/client";
 import type { Nutrients, Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
@@ -49,6 +49,8 @@ export interface ClientOptions {
   minIntervalMs?: number;
   backoffMs?: number;
   maxRetries?: number;
+  /** Bovengrens op het aantal verzoeken aan ah.nl; zie SubrequestBudgetError. */
+  maxRequests?: number;
 }
 
 export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptions) {
@@ -68,7 +70,11 @@ export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptio
   );
 }
 
-/** Herkent de blokkade van AH's botbescherming in een foutmelding. */
+/**
+ * Herkent de blokkade van AH's botbescherming. Let op het verschil met
+ * `isBudgetError`: dat is óns eigen plafond en zegt niets over AH, dus daar mag
+ * nooit een afkoelperiode op volgen.
+ */
 export function isBlocked(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return / -> (403|429)$/.test(message);
@@ -94,15 +100,59 @@ export async function storeAhNutrition(store: Store, recipe: Recipe): Promise<bo
   return true;
 }
 
-/** Voedingswaarde vastleggen: die van AH als die er is, anders zelf opbouwen. */
+/**
+ * Voedingswaarde vastleggen: die van AH als die er is, anders opgeteld uit de
+ * producten die we al kennen.
+ *
+ * Dit raakt bewust het netwerk niet. Eerder zocht dit per ongematcht ingredient
+ * een product op, en dat is precies wat de ronde opblies: een recept met vijftien
+ * ingredienten kostte dan dertig verzoeken, en Cloudflare kapte de hele aanroep
+ * af met "Too many subrequests" — waarna élk volgend recept in die ronde faalde.
+ * Ingesten kost nu één verzoek per recept; het koppelen van ingredienten aan
+ * producten is werk voor `enrichIngredientMatches`, met zijn eigen budget en
+ * eigen tempo, en `recomputeNutrition` telt het daarna alsnog op.
+ */
 export async function computeNutrition(
   store: Store,
   client: AhClient,
   recipe: Recipe,
 ): Promise<void> {
   if (await storeAhNutrition(store, recipe)) return;
-  const resolved = await resolveRecipe(recipe, client, store);
+  const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
   await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+}
+
+/**
+ * Telt recepttotalen opnieuw op uit de inmiddels bekende producten — puur uit de
+ * database, zonder één verzoek aan ah.nl.
+ *
+ * Zonder deze stap blijft een recept op de dekking staan die het bij binnenkomst
+ * had (meestal nul, want toen was er nog niets gekoppeld), ook nadat de
+ * enrichment-ronde al zijn ingredienten heeft gevonden. AH's eigen cijfers
+ * blijven staan: `putNutrition` laat een 'ah'-bron niet overschrijven.
+ */
+export async function recomputeNutrition(env: ScrapeEnv, limit: number): Promise<number> {
+  const store = new Store(env.DB);
+  const ids = await store.recipesNeedingRecompute(limit);
+  if (ids.length === 0) return 0;
+
+  // Geen netwerk, dus een client zonder budget is hier veilig; `cacheOnly` zorgt
+  // dat hij nooit gebruikt wordt.
+  const client = scrapeClient(env, store);
+  let updated = 0;
+  for (const id of ids) {
+    const recipe = await store.getRecipe(id);
+    if (!recipe) continue;
+    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
+    const coverage = coverageOf(resolved);
+    if (coverage <= 0) continue;
+    await store.putNutrition(id, resolved.total, coverage);
+    updated++;
+  }
+  if (updated > 0) {
+    await store.log("info", "ingest", `${updated} recepten opnieuw doorgerekend uit bekende producten`);
+  }
+  return updated;
 }
 
 export interface IngestResult {
@@ -133,13 +183,16 @@ export async function ingestQueries(
   let added = 0;
   let skipped = 0;
   let blocked = 0;
+  let budgetOver = client.budget.max;
   const errors: string[] = [];
 
   for (const query of queries) {
+    if (client.budget.max - client.budget.used < 2) break;
     let found: Recipe[];
     try {
       found = await client.searchRecipes(query, perQuery);
     } catch (err) {
+      if (isBudgetError(err)) break;
       if (isBlocked(err)) blocked++;
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`search "${query}": ${message}`);
@@ -161,6 +214,10 @@ export async function ingestQueries(
     for (const stub of found) {
       if (added >= limit) break;
       try {
+        budgetOver = client.budget.max - client.budget.used;
+        // Onder de twee verzoeken over: stoppen vóór Cloudflare ons afkapt, want
+        // dan verliezen we ook het wegschrijven van wat we al hadden.
+        if (budgetOver < 2) break;
         const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
         if (!full || full.ingredients.length === 0) {
           await store.log("warn", "ingest", `${stub.id} kwam zonder ingredienten binnen`, {
@@ -170,6 +227,13 @@ export async function ingestQueries(
         }
         await store.putRecipe(full);
         await computeNutrition(store, client, full);
+        // Diagnose voor de productlinks: hangt AH er zelf producten aan, dan
+        // hoeft de enrichment-ronde straks niets te zoeken. Staat hier steevast
+        // 0, dan zit die koppeling niet (meer) in de pagina.
+        const metLink = full.ingredients.filter((i) => i.productId).length;
+        await store.log("info", "ingest", `${full.title}: ${metLink}/${full.ingredients.length} ingredienten met AH-productlink`, {
+          recept: full.id,
+        });
         // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
         if (wantedMoment && momentOf(full) !== wantedMoment) {
           skipped++;
@@ -177,6 +241,10 @@ export async function ingestQueries(
         }
         added++;
       } catch (err) {
+        if (isBudgetError(err)) {
+          await store.log("info", "ingest", "verzoekbudget op; ronde stopt hier");
+          break;
+        }
         if (isBlocked(err)) blocked++;
         const message = err instanceof Error ? err.message : String(err);
         errors.push(`recipe ${stub.id}: ${message}`);
@@ -190,7 +258,13 @@ export async function ingestQueries(
     blocked > 0 ? "warn" : "info",
     "ingest",
     `${added} recepten toegevoegd voor ${wantedMoment ?? "alles"}`,
-    { queries, skipped, blocked, fouten: errors.length },
+    {
+      queries,
+      skipped,
+      blocked,
+      fouten: errors.length,
+      verzoeken: `${client.budget.used}/${client.budget.max}`,
+    },
   );
   return { added, skipped, blocked, errors };
 }
@@ -222,6 +296,7 @@ export async function repairEmptyRecipes(
   const errors: string[] = [];
 
   for (const id of ids) {
+    if (client.budget.max - client.budget.used < 2) break;
     try {
       const recipe = await client.getRecipe(id);
       if (!recipe || recipe.ingredients.length === 0) {
@@ -233,6 +308,7 @@ export async function repairEmptyRecipes(
       await computeNutrition(store, client, recipe);
       repaired++;
     } catch (err) {
+      if (isBudgetError(err)) break;
       if (isBlocked(err)) blocked++;
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${id}: ${message}`);
@@ -284,6 +360,7 @@ export async function enrichIngredientMatches(
   const errors: string[] = [];
 
   for (const { name, productId } of names) {
+    if (client.budget.max - client.budget.used < 3) break;
     try {
       // Heeft AH bij het recept zelf al een product aangewezen, dan is dat het:
       // één detailaanroep in plaats van zoeken plus raden, en zonder foutmarge.
@@ -310,6 +387,7 @@ export async function enrichIngredientMatches(
         await store.log("warn", "enrich", `"${name}" leverde geen bruikbaar product op`);
       }
     } catch (err) {
+      if (isBudgetError(err)) break;
       if (isBlocked(err)) blocked++;
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${name}: ${message}`);
@@ -317,5 +395,9 @@ export async function enrichIngredientMatches(
     }
   }
 
+  await store.log("info", "enrich", `${matched} gekoppeld, ${unmatched} zonder product`, {
+    verzoeken: `${client.budget.used}/${client.budget.max}`,
+    blocked,
+  });
   return { examined: names.length, matched, unmatched, blocked, errors };
 }

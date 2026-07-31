@@ -4,6 +4,7 @@ import {
   MOMENT_QUERIES,
   enrichIngredientMatches,
   ingestQueries,
+  recomputeNutrition,
   repairEmptyRecipes,
   type ScrapeEnv,
 } from "./pipeline";
@@ -63,6 +64,15 @@ export interface AutoConfig {
   /** Hoeveel logregels er bewaard blijven; oudere gaan elke ronde weg. */
   logKeep: number;
   /**
+   * Bovengrens op het aantal verzoeken aan ah.nl per ronde. Een worker mag er
+   * maar een beperkt aantal doen (50 op het gratis plan); ging dat op, dan kapte
+   * Cloudflare de ronde middenin af en faalde elk resterend recept met "Too many
+   * subrequests". Onder de grens blijven is de enige manier om dat te vermijden.
+   */
+  maxRequests: number;
+  /** Recepten die per ronde opnieuw doorgerekend worden; kost geen verzoeken. */
+  recomputeBatch: number;
+  /**
    * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
    * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
    * zou enrichment nooit laten draaien, want de eetmoment-rotatie heeft altijd
@@ -83,6 +93,8 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   purgeGraceMs: 24 * 60 * 60 * 1000,
   purgeBatch: 200,
   logKeep: 2000,
+  maxRequests: 40,
+  recomputeBatch: 50,
 };
 
 export interface AutoResult {
@@ -92,6 +104,8 @@ export interface AutoResult {
   mode?: "repair" | "moment" | "enrich";
   /** Recepten die deze ronde zijn weggegooid omdat er niets bruikbaars in stond. */
   purged?: number;
+  /** Recepten waarvan het totaal opnieuw is opgeteld uit inmiddels bekende producten. */
+  recomputed?: number;
   detail?: string;
   added?: number;
   repaired?: number;
@@ -120,6 +134,8 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     purgeGraceMs: read("AUTO_PURGE_GRACE_MS", DEFAULT_AUTO_CONFIG.purgeGraceMs),
     purgeBatch: read("AUTO_PURGE_BATCH", DEFAULT_AUTO_CONFIG.purgeBatch),
     logKeep: read("AUTO_LOG_KEEP", DEFAULT_AUTO_CONFIG.logKeep),
+    maxRequests: read("AUTO_MAX_REQUESTS", DEFAULT_AUTO_CONFIG.maxRequests),
+    recomputeBatch: read("AUTO_RECOMPUTE_BATCH", DEFAULT_AUTO_CONFIG.recomputeBatch),
   };
 }
 
@@ -166,7 +182,16 @@ export async function runAutoIngest(
   // waar verder alles een bovengrens heeft.
   await store.trimLogs(config.logKeep);
 
-  const clientOptions = { minIntervalMs: config.minIntervalMs, backoffMs: config.backoffMs };
+  // Opnieuw doorrekenen wat inmiddels gekoppeld is. Puur database, dus dit hoort
+  // net als het opruimen vóór het netwerkwerk: het maakt recepten bruikbaar
+  // zonder één verzoek aan ah.nl.
+  const recomputed = await recomputeNutrition(env, config.recomputeBatch);
+
+  const clientOptions = {
+    minIntervalMs: config.minIntervalMs,
+    backoffMs: config.backoffMs,
+    maxRequests: config.maxRequests,
+  };
   // Lege recepten eerst: die kosten één pagina en leveren meteen een bruikbaar
   // recept op, terwijl nieuw zoeken pas na de detailpagina iets oplevert.
   const empty = await store.countWithoutIngredients();
@@ -181,6 +206,7 @@ export async function runAutoIngest(
       ran: true,
       mode: "repair",
       purged,
+      recomputed,
       detail: `${empty} lege recepten open`,
       repaired: result.repaired,
       blocked: result.blocked,
@@ -206,6 +232,7 @@ export async function runAutoIngest(
         ran: true,
         mode: "enrich",
         purged,
+        recomputed,
         detail: `${openNames} koppelingen open`,
         enriched: result.matched,
         blocked: result.blocked,
@@ -233,6 +260,7 @@ export async function runAutoIngest(
     ran: true,
     mode: "moment",
     purged,
+    recomputed,
     detail: `${moment}: ${query}`,
     added: result.added,
     blocked: result.blocked,

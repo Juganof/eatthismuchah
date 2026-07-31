@@ -359,3 +359,63 @@ describe("opruimen", () => {
     expect(await store.getRecipe("R-NIEUW")).not.toBeNull();
   });
 });
+
+describe("verzoekbudget", () => {
+  it("doet tijdens het ingesten geen enkele productlookup", async () => {
+    const calls = stubAh();
+    const env = envFor();
+
+    await runAutoIngest(env, fastConfig);
+
+    // Dit was de bug uit de log: elk ongematcht ingredient werd tijdens de
+    // ingest opgezocht, waarna Cloudflare de ronde afkapte met "Too many
+    // subrequests" en élk resterend recept faalde. Koppelen is werk voor de
+    // enrichment-ronde, met zijn eigen budget.
+    expect(calls.filter((c) => c.includes("/product/"))).toHaveLength(0);
+  });
+
+  it("stopt vóór het budget op is in plaats van erdoorheen te lopen", async () => {
+    const calls = stubAh();
+    const env = envFor();
+
+    // Vier verzoeken is genoeg voor de zoekpagina en één recept, niet voor twee.
+    await runAutoIngest(env, { ...fastConfig, maxRequests: 3, batch: 10 });
+
+    expect(calls.filter((c) => c.includes("ah.nl")).length).toBeLessThanOrEqual(3);
+    const logs = await new Store(env.DB).recentLogs(50);
+    expect(logs.some((l) => l.message.includes("recepten toegevoegd"))).toBe(true);
+    // Geen "Too many subrequests"-achtige foutregels: we stopten zelf op tijd.
+    expect(logs.filter((l) => l.level === "error")).toHaveLength(0);
+  });
+
+  it("rekent opnieuw door zodra een ingredient alsnog gekoppeld is", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+
+    await store.putRecipe({
+      id: "R-R900",
+      title: "Havermout",
+      url: "https://www.ah.nl/allerhande/recept/R-R900",
+      servings: 1,
+      imageUrl: null,
+      ingredients: [{ name: "havermout", quantity: 100, unit: "g" }],
+    });
+    await store.putNutrition("R-R900", {}, 0);
+    // Alsof de enrichment-ronde hem net gevonden heeft.
+    await store.putProduct({
+      webshopId: "wi-1",
+      title: "AH Havermout",
+      salesUnitSize: "500 g",
+      per100g: { kcal: 375, protein: 13 },
+    });
+    await store.putMatch("havermout", "wi-1", 1);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    expect(result.recomputed).toBe(1);
+    const [row] = await store.listRecipes({ query: "Havermout" }).then((r) => r.rows);
+    expect(row!.nutrition!.kcal).toBeCloseTo(375);
+    expect(row!.coverage).toBe(1);
+  });
+});
