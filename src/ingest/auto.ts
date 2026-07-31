@@ -20,7 +20,10 @@ import {
  * Elke ronde doet één ding:
  *   1. staan er lege recepten? die eerst — een titel zonder ingredienten is
  *      waardeloos voor de planner, en het aanvullen kost één pagina per recept;
- *   2. anders: nieuwe recepten voor het eetmoment dat aan de beurt is.
+ *   2. is er nog niets plánbaar, of is het de beurt van de koppelronde, dan
+ *      ingredienten aan producten koppelen: zonder die koppelingen kan de
+ *      planner met geen enkel recept iets, dus meer ophalen heeft dan geen zin;
+ *   3. anders: nieuwe recepten voor het eetmoment dat aan de beurt is.
  *
  * Verder houdt hij zich in: een dagbudget zodat we niet eindeloos blijven
  * hameren, en een afkoelperiode zodra AH ons alsnog blokkeert.
@@ -73,6 +76,13 @@ export interface AutoConfig {
   /** Recepten die per ronde opnieuw doorgerekend worden; kost geen verzoeken. */
   recomputeBatch: number;
   /**
+   * Vanaf hoeveel blokkades in één ronde we ons gedeisd houden. Eén enkele 403
+   * op één pagina zegt niets over het tempo — dat is vaak gewoon een recept dat
+   * niet meer bestaat — en daar de hele automaat een uur voor stilleggen kost
+   * veel meer dan het oplevert.
+   */
+  cooldownAfterBlocks: number;
+  /**
    * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
    * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
    * zou enrichment nooit laten draaien, want de eetmoment-rotatie heeft altijd
@@ -95,6 +105,7 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   logKeep: 2000,
   maxRequests: 40,
   recomputeBatch: 50,
+  cooldownAfterBlocks: 2,
 };
 
 export interface AutoResult {
@@ -136,6 +147,7 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     logKeep: read("AUTO_LOG_KEEP", DEFAULT_AUTO_CONFIG.logKeep),
     maxRequests: read("AUTO_MAX_REQUESTS", DEFAULT_AUTO_CONFIG.maxRequests),
     recomputeBatch: read("AUTO_RECOMPUTE_BATCH", DEFAULT_AUTO_CONFIG.recomputeBatch),
+    cooldownAfterBlocks: read("AUTO_COOLDOWN_AFTER_BLOCKS", DEFAULT_AUTO_CONFIG.cooldownAfterBlocks),
   };
 }
 
@@ -220,7 +232,12 @@ export async function runAutoIngest(
   const enrichTurn = Number((await store.getState(ENRICH_TURN)) ?? 0);
   await store.setState(ENRICH_TURN, String((enrichTurn + 1) % config.enrichEvery));
 
-  if (enrichTurn === 0) {
+  // Zolang er geen enkel recept plambaar is, heeft méér recepten ophalen geen
+  // zin: zonder gekoppelde ingredienten kan de planner er toch niets mee. Dan
+  // gaat elke ronde naar koppelen, niet één op de drie.
+  const niksPlanbaar = (await store.countPlannable()) === 0;
+
+  if (enrichTurn === 0 || niksPlanbaar) {
     const openNames = await store.countIngredientNamesWithoutMatch();
     if (openNames > 0) {
       await store.log("info", "auto", `ronde: ${openNames} ingredient-koppelingen open`);
@@ -286,6 +303,13 @@ async function applyCooldown(
 ): Promise<number | null> {
   if (blocked === 0) {
     await store.setState(BLOCK_STREAK, "0");
+    return null;
+  }
+  // Eén geblokkeerde pagina is ruis, geen blokkade. Dat verschil is duur
+  // gebleken: één recept dat structureel 403 gaf, legde de hele automaat
+  // anderhalf uur stil terwijl alle andere verzoeken gewoon 200 gaven.
+  if (blocked < config.cooldownAfterBlocks) {
+    await store.log("info", "auto", `${blocked}x geblokkeerd; te weinig om af te koelen`);
     return null;
   }
   const streak = Number((await store.getState(BLOCK_STREAK)) ?? 0) + 1;

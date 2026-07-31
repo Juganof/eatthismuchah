@@ -339,6 +339,23 @@ export class Store {
       .run();
   }
 
+  /**
+   * Markeert een mislukte herstelpoging door het recept opnieuw "net opgehaald"
+   * te noemen. Daarmee zakt het naar de staart van de wachtrij hieronder.
+   *
+   * Zonder dit gijzelt één recept de hele automaat: de herstel-laag pakt altijd
+   * het oudste lege recept, dus een recept dat structureel 403 geeft (verwijderd,
+   * verhuisd) komt elke ronde weer als eerste aan de beurt, faalt weer, en zet
+   * daarmee ook nog eens de afkoelperiode aan. In de praktijk lag het bijvullen
+   * daardoor anderhalf uur stil voor één recept.
+   */
+  async markRepairAttempt(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE recipes SET fetched_at = ? WHERE id = ?")
+      .bind(Date.now(), id)
+      .run();
+  }
+
   /** Recepten die nog geen ingredienten hebben, meestal door een geblokkeerde scrape. */
   async recipesWithoutIngredients(limit: number): Promise<string[]> {
     const { results } = await this.db

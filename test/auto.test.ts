@@ -3,6 +3,7 @@ import { resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
 import { DEFAULT_AUTO_CONFIG, autoStatus, configFrom, runAutoIngest } from "../src/ingest/auto";
 import { createTestDb, type TestDb } from "./helpers/d1";
+import { FOODS, seedRecipes } from "./helpers/seed";
 
 /**
  * De automaat draait op een cron waar niemand naar kijkt, dus het gedrag moet
@@ -147,8 +148,13 @@ describe("runAutoIngest", () => {
     const env = envFor();
     const store = new Store(env.DB);
     // Los van enrichment: dat heeft zijn eigen tests hieronder, en zou anders
-    // een van deze vier rondes inpikken.
+    // een van deze vier rondes inpikken. Eén bruikbaar recept in de database
+    // hoort daarbij: zonder dat gaat élke ronde naar koppelen, want dan valt er
+    // niets te plannen en heeft méér recepten ophalen geen zin.
     const config = { ...fastConfig, enrichEvery: 1000 };
+    await seedRecipes(store, [
+      { id: "R-SEED", title: "Kwark", ingredients: [{ name: "kwark", grams: 200, per100g: FOODS.kwark! }] },
+    ]);
 
     const seen: string[] = [];
     for (let i = 0; i < 4; i++) {
@@ -182,7 +188,9 @@ describe("runAutoIngest", () => {
     // expires just walks into the same wall; the cooldown should grow instead of
     // resetting to the same fixed length every time.
     const env = envFor();
-    const config = { ...fastConfig, cooldownMs: 1000, maxCooldownMs: 3000 };
+    // cooldownAfterBlocks 1: deze test gaat over hoe lang er afgekoeld wordt,
+    // niet over vanaf hoeveel blokkades dat begint — dat is de test hieronder.
+    const config = { ...fastConfig, cooldownMs: 1000, maxCooldownMs: 3000, cooldownAfterBlocks: 1 };
 
     stubAh({ blockDetails: true });
     const first = await runAutoIngest(env, config, { force: true });
@@ -201,7 +209,9 @@ describe("runAutoIngest", () => {
     stubAh();
     await runAutoIngest(env, config, { force: true });
 
-    stubAh({ blockDetails: true });
+    // Alles blokkeren, want welke laag er nu aan de beurt is hangt ervan af wat
+    // die schone ronde binnenhaalde — het gaat hier om de teller, niet om de laag.
+    stubAh({ blockDetails: true, blockProducts: true });
     const afterReset = await runAutoIngest(env, config, { force: true });
     expect(afterReset.cooldownUntil! - Date.now()).toBeCloseTo(1000, -2);
   });
@@ -279,7 +289,11 @@ describe("enrichment tier", () => {
     const store = new Store(env.DB);
     await seedUnmatched(store);
 
-    const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 1 });
+    const result = await runAutoIngest(env, {
+      ...fastConfig,
+      enrichEvery: 1,
+      cooldownAfterBlocks: 1,
+    });
 
     expect(result.mode).toBe("enrich");
     expect(result.blocked).toBeGreaterThan(0);
@@ -419,5 +433,76 @@ describe("verzoekbudget", () => {
     const [row] = await store.listRecipes({ query: "Havermout" }).then((r) => r.rows);
     expect(row!.nutrition!.kcal).toBeCloseTo(375);
     expect(row!.coverage).toBe(1);
+  });
+});
+
+describe("één stuk recept mag de automaat niet gijzelen", () => {
+  it("koelt niet af van één enkele geblokkeerde pagina", async () => {
+    const env = envFor();
+    const store = new Store(env.DB);
+    // Precies het geval uit de log: één recept dat 403 blijft geven, terwijl
+    // alle andere verzoeken gewoon doorkomen.
+    await store.putRecipe({
+      id: "R-STUK",
+      title: "Bestaat niet meer",
+      url: "https://www.ah.nl/allerhande/recept/R-STUK",
+      servings: 2,
+      imageUrl: null,
+      ingredients: [],
+    });
+    stubAh({ blockDetails: true });
+
+    const result = await runAutoIngest(env, { ...fastConfig, batch: 1 });
+
+    expect(result.mode).toBe("repair");
+    expect(result.blocked).toBe(1);
+    // Anderhalf uur stilliggen voor één kapot recept is de kwaal, niet de kuur.
+    expect(result.cooldownUntil).toBeUndefined();
+  });
+
+  it("zet een mislukt recept achteraan in de wachtrij", async () => {
+    const env = envFor();
+    const store = new Store(env.DB);
+    const leeg = (id: string) => ({
+      id,
+      title: id,
+      url: `https://www.ah.nl/allerhande/recept/${id}`,
+      servings: 2,
+      imageUrl: null,
+      ingredients: [],
+    });
+    await store.putRecipe(leeg("R-STUK"));
+    await store.putRecipe(leeg("R-GOED"));
+    expect(await store.recipesWithoutIngredients(2)).toEqual(["R-STUK", "R-GOED"]);
+
+    stubAh({ blockDetails: true });
+    await runAutoIngest(env, { ...fastConfig, batch: 1 });
+
+    // Zonder dit pakt elke volgende ronde weer R-STUK, en komt R-GOED nooit aan
+    // de beurt — precies wat er anderhalf uur lang gebeurde.
+    expect(await store.recipesWithoutIngredients(2)).toEqual(["R-GOED", "R-STUK"]);
+  });
+});
+
+describe("koppelen krijgt voorrang zolang er niets te plannen valt", () => {
+  it("gaat elke ronde naar koppelen in plaats van één op de drie", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    await store.putRecipe({
+      id: "R-R1",
+      title: "Havermout met kwark",
+      url: "https://www.ah.nl/allerhande/recept/R-R1",
+      servings: 1,
+      imageUrl: null,
+      ingredients: [{ name: "havermout", quantity: 100, unit: "g" }],
+    });
+    await store.putNutrition("R-R1", { kcal: 400 }, 1, "ah");
+
+    // enrichEvery 3 zou dit normaal een "moment"-ronde maken; met een lege
+    // planner is meer recepten ophalen echter zinloos.
+    const result = await runAutoIngest(env, { ...fastConfig, enrichEvery: 3 });
+
+    expect(result.mode).toBe("enrich");
   });
 });

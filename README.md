@@ -266,6 +266,10 @@ de ingebouwde paginastate in plaats van naar CSS-selectors — maar als resultat
 blijven, vraag dan eerst `GET /api/probe` op: die zegt welke stap stuk is. Daarna is
 `POST /api/reparse` je vangnet.
 
+Zolang er geen enkel recept plánbaar is, gaat élke automatische ronde naar het
+koppelen van ingrediënten in plaats van één op de drie: meer recepten ophalen heeft
+geen zin als de planner er toch niets mee kan.
+
 **Een worker mag maar een beperkt aantal verzoeken doen per aanroep.** Op het gratis
 plan zijn dat er 50, en die grens is makkelijker te raken dan hij klinkt: één recept
 met vijftien ingrediënten kostte vroeger dertig productlookups, waarna Cloudflare de
@@ -275,6 +279,14 @@ hij netjes vóór de grens. Het werk is bovendien over rondes verdeeld: ingesten
 één verzoek per recept en doet geen productlookups, koppelen gebeurt in de
 enrichment-ronde, en het opnieuw optellen van recepttotalen gebeurt volledig uit de
 database.
+
+**Eén kapot recept mag de automaat niet gijzelen.** De herstel-laag pakt altijd het
+oudste lege recept, dus een recept dat structureel 403 geeft (verwijderd, verhuisd)
+kwam elke ronde weer als eerste aan de beurt, faalde weer, en zette daarmee ook nog
+eens de afkoelperiode aan — in de praktijk lag het bijvullen anderhalf uur stil voor
+één recept. Een mislukte poging zet het recept nu achteraan de rij, en er wordt pas
+afgekoeld vanaf twee blokkades in één ronde (`AUTO_COOLDOWN_AFTER_BLOCKS`): één 403 op
+één pagina zegt niets over het tempo.
 
 **ah.nl remt je af, en dat merk je aan lege recepten.** De site staat achter Akamai's
 botbescherming, die op tempo reageert en niet op aantallen: drie receptpagina's binnen

@@ -183,7 +183,6 @@ export async function ingestQueries(
   let added = 0;
   let skipped = 0;
   let blocked = 0;
-  let budgetOver = client.budget.max;
   const errors: string[] = [];
 
   for (const query of queries) {
@@ -214,10 +213,9 @@ export async function ingestQueries(
     for (const stub of found) {
       if (added >= limit) break;
       try {
-        budgetOver = client.budget.max - client.budget.used;
         // Onder de twee verzoeken over: stoppen vóór Cloudflare ons afkapt, want
         // dan verliezen we ook het wegschrijven van wat we al hadden.
-        if (budgetOver < 2) break;
+        if (client.budget.max - client.budget.used < 2) break;
         const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
         if (!full || full.ingredients.length === 0) {
           await store.log("warn", "ingest", `${stub.id} kwam zonder ingredienten binnen`, {
@@ -304,6 +302,7 @@ export async function repairEmptyRecipes(
       const recipe = await client.getRecipe(id);
       if (!recipe || recipe.ingredients.length === 0) {
         errors.push(`${id}: nog steeds geen ingredienten`);
+        await store.markRepairAttempt(id);
         await store.log("warn", "repair", `${id} heeft nog steeds geen ingredienten`);
         continue;
       }
@@ -313,6 +312,9 @@ export async function repairEmptyRecipes(
     } catch (err) {
       if (isBudgetError(err)) break;
       if (isBlocked(err)) blocked++;
+      // Achteraan in de rij: anders probeert de volgende ronde exact dit recept
+      // weer als eerste, en komt de rest nooit aan de beurt.
+      await store.markRepairAttempt(id);
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${id}: ${message}`);
       await store.log("error", "repair", `${id} aanvullen mislukt`, { fout: message });
