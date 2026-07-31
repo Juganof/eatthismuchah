@@ -152,6 +152,35 @@ describe("runAutoIngest", () => {
     expect(second.reason).toContain("afkoelen");
   });
 
+  it("doubles the cooldown on each consecutive block, capped at the maximum", async () => {
+    // A block that outlasts one cooldown period means trying again right after it
+    // expires just walks into the same wall; the cooldown should grow instead of
+    // resetting to the same fixed length every time.
+    const env = envFor();
+    const config = { ...fastConfig, cooldownMs: 1000, maxCooldownMs: 3000 };
+
+    stubAh({ blockDetails: true });
+    const first = await runAutoIngest(env, config, { force: true });
+    expect(first.cooldownUntil! - Date.now()).toBeCloseTo(1000, -2);
+
+    stubAh({ blockDetails: true });
+    const second = await runAutoIngest(env, config, { force: true });
+    expect(second.cooldownUntil! - Date.now()).toBeCloseTo(2000, -2);
+
+    // Capped rather than continuing to double forever.
+    stubAh({ blockDetails: true });
+    const third = await runAutoIngest(env, config, { force: true });
+    expect(third.cooldownUntil! - Date.now()).toBeCloseTo(3000, -2);
+
+    // A clean round resets the streak, so the next block starts back at the base.
+    stubAh();
+    await runAutoIngest(env, config, { force: true });
+
+    stubAh({ blockDetails: true });
+    const afterReset = await runAutoIngest(env, config, { force: true });
+    expect(afterReset.cooldownUntil! - Date.now()).toBeCloseTo(1000, -2);
+  });
+
   it("still runs when forced, so you can test without waiting out the cooldown", async () => {
     stubAh({ blockDetails: true });
     const env = envFor();

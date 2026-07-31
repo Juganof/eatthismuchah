@@ -27,6 +27,7 @@ import {
 /** Sleutels in app_state. */
 const CURSOR = "auto:cursor";
 const COOLDOWN_UNTIL = "auto:cooldown_until";
+const BLOCK_STREAK = "auto:block_streak";
 
 export interface AutoConfig {
   /** Recepten per ronde. Klein houden: een ronde moet binnen de worker passen. */
@@ -37,6 +38,13 @@ export interface AutoConfig {
   minIntervalMs: number;
   /** Hoe lang we niets doen nadat AH ons geblokkeerd heeft. */
   cooldownMs: number;
+  /**
+   * Bovengrens voor de afkoelperiode. Blijft AH blokkeren zodra we het weer
+   * proberen, dan verdubbelt de afkoelperiode elke keer — anders blijft de
+   * automaat de hele dag om de vaste `cooldownMs` AH opnieuw porren, wat een
+   * blokkade die langer duurt dan dat alleen maar verlengt.
+   */
+  maxCooldownMs: number;
   /** Wachttijd voor de eerste herkansing binnen een ronde; verdubbelt daarna. */
   backoffMs: number;
 }
@@ -46,6 +54,7 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   dailyMax: 250,
   minIntervalMs: 700,
   cooldownMs: 30 * 60 * 1000,
+  maxCooldownMs: 4 * 60 * 60 * 1000,
   backoffMs: 1500,
 };
 
@@ -74,6 +83,7 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     dailyMax: read("AUTO_DAILY_MAX", DEFAULT_AUTO_CONFIG.dailyMax),
     minIntervalMs: read("AUTO_MIN_INTERVAL_MS", DEFAULT_AUTO_CONFIG.minIntervalMs),
     cooldownMs: read("AUTO_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.cooldownMs),
+    maxCooldownMs: read("AUTO_MAX_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.maxCooldownMs),
     backoffMs: read("AUTO_BACKOFF_MS", DEFAULT_AUTO_CONFIG.backoffMs),
   };
 }
@@ -150,6 +160,12 @@ export async function runAutoIngest(
 /**
  * Na blokkades even niets doen. Doorgaan alsof er niets aan de hand is maakt het
  * alleen erger: Akamai kijkt naar tempo, dus stilte is de enige manier terug.
+ *
+ * Blokkeert AH ons meteen weer zodra de afkoelperiode voorbij is, dan duurde de
+ * blokkade zelf langer dan die periode — nog eens dezelfde `cooldownMs` wachten
+ * betekent dan alleen maar opnieuw tegen dezelfde muur lopen. Elke opeenvolgende
+ * blokkade verdubbelt daarom de afkoelperiode, tot aan `maxCooldownMs`. Een
+ * schone ronde zet de teller weer op nul.
  */
 async function applyCooldown(
   store: Store,
@@ -157,8 +173,14 @@ async function applyCooldown(
   config: AutoConfig,
   now: number,
 ): Promise<number | null> {
-  if (blocked === 0) return null;
-  const until = now + config.cooldownMs;
+  if (blocked === 0) {
+    await store.setState(BLOCK_STREAK, "0");
+    return null;
+  }
+  const streak = Number((await store.getState(BLOCK_STREAK)) ?? 0) + 1;
+  await store.setState(BLOCK_STREAK, String(streak));
+  const cooldownMs = Math.min(config.cooldownMs * 2 ** (streak - 1), config.maxCooldownMs);
+  const until = now + cooldownMs;
   await store.setState(COOLDOWN_UNTIL, String(until));
   return until;
 }
@@ -174,6 +196,7 @@ export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AU
     dagbudget: config.dailyMax,
     openLegeRecepten: await store.countWithoutIngredients(),
     afkoelenTot: cooldownUntil > Date.now() ? cooldownUntil : null,
+    blokkadesOpEenRij: Number((await store.getState(BLOCK_STREAK)) ?? 0),
     volgende: MOMENTS[Number((await store.getState(CURSOR)) ?? 0) % MOMENTS.length],
     rondes: await store.recentRuns(10),
   };

@@ -636,10 +636,16 @@ function renderAutoStatus(s) {
     + '</div>';
 
   // Afkoelen is geen storing maar precies de bedoeling; alleen even melden.
+  // Bij meerdere blokkades op rij loopt de afkoelperiode op, dus dat melden we
+  // erbij — anders lijkt het alsof hij na elke 30 minuten weer vastloopt.
+  const streak = s.blokkadesOpEenRij || 0;
+  const streakNote = streak > 1
+    ? ' AH blokkeerde ons ' + streak + 'x op rij, dus de afkoelperiode loopt nu op.'
+    : "";
   const koelt = s.afkoelenTot
     ? '<p class="note">AH blokkeerde ons even. Het bijvullen ligt stil tot '
       + new Date(s.afkoelenTot).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })
-      + '.</p>'
+      + '.' + streakNote + '</p>'
     : "";
 
   const laatste = (s.rondes || []).slice(0, 5).map((r) => {
