@@ -74,11 +74,56 @@ function searchableText(recipe: Recipe): string {
 }
 
 /** Leidt de labels van een recept af. Draait bij elke opslag, dus houd het goedkoop. */
+/**
+ * AH's eigen labels (het `keywords`-veld) vertaald naar onze momentlabels. Dit
+ * is AH's indeling en dus gezaghebbend: staat er "ontbijt" bij, dan is het een
+ * ontbijt, ongeacht wat de titel doet vermoeden.
+ */
+/**
+ * Alleen de waarden uit AH's filtergroep "menugang" staan hier. Bewust niet de
+ * gerechttypes: een recept draagt labels als "brood/sandwiches" naast zijn
+ * menugang, en die twee door elkaar halen levert onzin op — het broodje uit dit
+ * voorbeeld is volgens AH een tussendoortje, geen lunch.
+ */
+const AH_MOMENTS: Record<string, string> = {
+  ontbijt: "ontbijt",
+  brunch: "ontbijt",
+  lunch: "lunch",
+  tussendoortje: "snack",
+  borrelhapje: "snack",
+  gebak: "snack",
+  hoofdgerecht: "diner",
+  bijgerecht: "diner",
+  voorgerecht: "diner",
+  nagerecht: "diner",
+};
+
+/** AH-labels die iets over het dieet zeggen. */
+const AH_CONTENT: Record<string, string> = {
+  vegetarisch: "vegetarisch-volgens-ah",
+  veganistisch: "veganistisch-volgens-ah",
+  vega: "vegetarisch-volgens-ah",
+};
+
 export function deriveTags(recipe: Recipe): string[] {
   const text = searchableText(recipe);
   const tags = new Set<string>();
   for (const [tag, re] of CONTENT_RULES) if (re.test(text)) tags.add(tag);
-  for (const [tag, re] of MOMENT_RULES) if (re.test(text)) tags.add(tag);
+
+  // AH's eigen labels gaan voor op onze titelheuristiek. Alleen als AH niets
+  // over het eetmoment zegt, raden we het zelf uit titel en ingredienten.
+  let momentFromAh = false;
+  for (const keyword of recipe.keywords ?? []) {
+    const moment = AH_MOMENTS[keyword];
+    if (moment) {
+      tags.add(moment);
+      momentFromAh = true;
+    }
+    const content = AH_CONTENT[keyword];
+    if (content) tags.add(content);
+  }
+
+  if (!momentFromAh) for (const [tag, re] of MOMENT_RULES) if (re.test(text)) tags.add(tag);
   // Varkensvlees is vlees. Dat afleiden in plaats van elke varkensterm ook in de
   // vleeslijst te herhalen, want die twee lijsten lopen gegarandeerd uit elkaar
   // — "prosciutto" stond al alleen in de eerste.

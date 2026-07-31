@@ -157,10 +157,19 @@ export function adminCard(): string {
   <div class="card">
     <details>
       <summary>Beheer &amp; database</summary>
+      <p class="muted">Recepten ophalen voor één eetmoment. AH's eigen indeling
+      bepaalt wat meetelt, dus een ontbijt is ook echt een ontbijt.</p>
       <div class="actions">
-        <button class="secondary small" id="ingest">Nieuwe recepten ophalen</button>
-        <button class="secondary small" id="probe">AH-verbinding testen</button>
+        <button class="secondary small moment" data-moment="ontbijt">Ontbijt</button>
+        <button class="secondary small moment" data-moment="lunch">Lunch</button>
+        <button class="secondary small moment" data-moment="snack">Tussendoortjes</button>
+        <button class="secondary small moment" data-moment="diner">Diner</button>
+      </div>
+      <div class="actions">
+        <button class="secondary small" id="ingest">Alles door elkaar ophalen</button>
+        <button class="secondary small" id="repair">Ontbrekende ingredi&euml;nten ophalen</button>
         <button class="secondary small" id="reparse">Archief opnieuw parsen</button>
+        <button class="secondary small" id="probe">AH-verbinding testen</button>
       </div>
       <p class="muted" id="stats"></p>
     </details>

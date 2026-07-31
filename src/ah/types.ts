@@ -25,6 +25,18 @@ export interface Recipe {
   servings: number;
   imageUrl: string | null;
   ingredients: RawIngredient[];
+  /**
+   * AH's own labels uit het `keywords`-veld van de recept-pagina, bijvoorbeeld
+   * "ontbijt", "tussendoortje", "vegetarisch". Dit is AH's eigen indeling en
+   * daarmee betrouwbaarder dan wat wij uit de titel kunnen raden.
+   */
+  keywords?: string[];
+  /**
+   * Voedingswaarde per portie zoals AH die zelf op de pagina zet. Als die er is,
+   * hoeven we hem niet uit losse producten op te bouwen — dat scheelt tientallen
+   * productzoekopdrachten en is bovendien nauwkeuriger.
+   */
+  nutritionPerServing?: Nutrients | null;
 }
 
 /** An AH webshop product, with nutrition normalised to per-100g. */

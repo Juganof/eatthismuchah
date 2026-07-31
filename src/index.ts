@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
 import { extractEmbeddedJson } from "./ah/scrape";
-import type { Recipe } from "./ah/types";
+import type { Nutrients, Recipe } from "./ah/types";
 import { Store, type SavedDayMeal } from "./db/queries";
+import { deriveTags } from "./nutrition/diet";
 import { coverageOf, resolveRecipe } from "./nutrition/resolve";
 import { splitTargets, type MealSlot } from "./nutrition/split";
 import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
@@ -64,6 +65,7 @@ app.get("/api/stats", async (c) => {
   return c.json({
     recipes: await store.countRecipes(),
     plannable: await store.countPlannable(),
+    zonderIngredienten: await store.countWithoutIngredients(),
     scrapes: raw.total,
     unparsed: raw.unparsed,
   });
@@ -110,11 +112,25 @@ app.get("/api/search", async (c) => {
  * lookup per new ingredient — so it runs in batches and nightly via cron.
  */
 app.post("/api/ingest", async (c) => {
-  type IngestBody = { queries?: string[]; limit?: number };
+  type IngestBody = { queries?: string[]; limit?: number; moment?: string };
   // An empty body is the normal case: the UI's "fetch new recipes" button posts "{}".
   const body: IngestBody = await c.req.json<IngestBody>().catch(() => ({}));
-  const queries = body.queries ?? c.env.INGEST_QUERIES.split(",").map((s) => s.trim());
   const limit = body.limit ?? Number(c.env.INGEST_LIMIT || 20);
+
+  // Scrapen voor één eetmoment: zoek op AH's eigen termen voor dat moment en
+  // houd daarna alleen over wat AH zélf zo gelabeld heeft.
+  if (body.moment) {
+    const queries = MOMENT_QUERIES[body.moment];
+    if (!queries) {
+      return c.json(
+        { error: `onbekend eetmoment "${body.moment}"; kies uit ${Object.keys(MOMENT_QUERIES).join(", ")}` },
+        400,
+      );
+    }
+    return c.json(await ingest(c.env, queries, limit, body.moment));
+  }
+
+  const queries = body.queries ?? c.env.INGEST_QUERIES.split(",").map((s) => s.trim());
   return c.json(await ingest(c.env, queries, limit));
 });
 
@@ -152,6 +168,44 @@ app.post("/api/reparse", async (c) => {
   // Voedingswaarde bijwerken gebeurt op de achtergrond: dat doet netwerk.
   c.executionCtx?.waitUntil(hydrate(c.env, rows.map((r) => r.ref)));
   return c.json({ examined: rows.length, recovered, failed: failed.slice(0, 20) });
+});
+
+/**
+ * Haalt recepten opnieuw op die geen ingredienten hebben. Dat zijn er meestal
+ * een hoop: een zoekopdracht levert alleen titels, en als AH's botbescherming
+ * daarna de detailpagina's blokkeert, blijven ze leeg staan. Dit is de knop die
+ * dat rechttrekt — rustig aan, want haast is precies waarom het misging.
+ */
+app.post("/api/repair", async (c) => {
+  const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
+  const store = storeFor(c.env);
+  const ids = await store.recipesWithoutIngredients(body.limit ?? 25);
+  if (ids.length === 0) return c.json({ pending: 0, repaired: 0, message: "niets te herstellen" });
+
+  const client = clientFor(c.env, c.executionCtx);
+  let repaired = 0;
+  const errors: string[] = [];
+
+  for (const id of ids) {
+    try {
+      const recipe = await client.getRecipe(id);
+      if (!recipe || recipe.ingredients.length === 0) {
+        errors.push(`${id}: nog steeds geen ingredienten`);
+        continue;
+      }
+      await store.putRecipe(recipe);
+      if (!(await storeAhNutrition(store, recipe))) {
+        const resolved = await resolveRecipe(recipe, client, store);
+        await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+      }
+      repaired++;
+    } catch (err) {
+      errors.push(`${id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const remaining = await store.recipesWithoutIngredients(1000);
+  return c.json({ examined: ids.length, repaired, remaining: remaining.length, errors: errors.slice(0, 10) });
 });
 
 /** Nutrition and ingredient breakdown for one recipe, without any rescaling. */
@@ -597,6 +651,26 @@ function shiftDate(date: string, days: number): string {
 }
 
 /**
+ * Bewaart de voedingswaarde die AH zelf bij het recept vermeldt. Dat scheelt een
+ * productzoekopdracht per ingredient én is nauwkeuriger, dus dit is het pad dat
+ * we het liefst nemen. AH geeft de waarden per portie; de rest van de app rekent
+ * met het hele recept.
+ */
+async function storeAhNutrition(store: Store, recipe: Recipe): Promise<boolean> {
+  const perServing = recipe.nutritionPerServing;
+  if (!perServing) return false;
+
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const total: Nutrients = {};
+  for (const [key, value] of Object.entries(perServing)) {
+    total[key as keyof Nutrients] = value * servings;
+  }
+  // Coverage 1: dit komt van de bron zelf, daar valt niets aan te schatten.
+  await store.putNutrition(recipe.id, total, 1, "ah");
+  return true;
+}
+
+/**
  * Rekent recepten door en bewaart de uitkomst, zodat ze in de dagplanner
  * verschijnen. Bewust foutbestendig per recept: één kapot recept mag de rest niet
  * meeslepen, want dit draait op de achtergrond en niemand ziet de fout.
@@ -613,6 +687,8 @@ async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
         if (!recipe || recipe.ingredients.length === 0) continue;
         await store.putRecipe(recipe);
       }
+      // Heeft AH het zelf al uitgerekend, dan zijn we klaar.
+      if (await storeAhNutrition(store, recipe)) continue;
       const resolved = await resolveRecipe(recipe, client, store);
       await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
     } catch {
@@ -621,11 +697,40 @@ async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
   }
 }
 
-async function ingest(env: Env, queries: string[], limit: number) {
+/**
+ * Zoektermen per eetmoment. AH's zoekfunctie kent zijn eigen indeling
+ * ("menugang": ontbijt, lunch, tussendoortje, hoofdgerecht), maar die filter zit
+ * achter een GraphQL-aanroep die we niet kunnen vastpinnen. Zoeken op deze
+ * woorden levert dezelfde hoek van de catalogus op, en de controle achteraf
+ * gebeurt op AH's eigen labels — zie `momentOf` hieronder.
+ */
+const MOMENT_QUERIES: Record<string, string[]> = {
+  ontbijt: ["ontbijt", "havermout", "kwark ontbijt", "smoothie", "pannenkoeken", "yoghurt"],
+  lunch: ["lunch", "salade", "soep", "broodje", "wrap", "tosti"],
+  snack: ["tussendoortje", "snack", "energiereep", "hapje", "dip"],
+  diner: ["hoofdgerecht", "pasta", "ovenschotel", "curry", "rijst", "traybake"],
+};
+
+/** Het eetmoment dat AH zelf aan een recept hangt, of null als het niets zegt. */
+function momentOf(recipe: Recipe): string | null {
+  for (const tag of deriveTags(recipe)) {
+    if (tag === "ontbijt" || tag === "lunch" || tag === "snack" || tag === "diner") return tag;
+  }
+  return null;
+}
+
+/**
+ * `wantedMoment` maakt van een brede zoekopdracht een gerichte: alles wordt
+ * opgehaald en bewaard (weggooien van een scrape doen we nooit), maar alleen wat
+ * AH als dat moment labelt telt mee voor de limiet.
+ */
+async function ingest(env: Env, queries: string[], limit: number, wantedMoment?: string) {
   const store = new Store(env.DB);
   const client = new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw));
   const perQuery = Math.max(1, Math.ceil(limit / Math.max(1, queries.length)));
   let added = 0;
+  // Opgehaald en bewaard, maar niet van het gevraagde eetmoment.
+  let skipped = 0;
   const errors: string[] = [];
 
   for (const query of queries) {
@@ -655,8 +760,17 @@ async function ingest(env: Env, queries: string[], limit: number) {
         const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
         if (!full || full.ingredients.length === 0) continue;
         await store.putRecipe(full);
-        const resolved = await resolveRecipe(full, client, store);
-        await store.putNutrition(full.id, resolved.total, coverageOf(resolved));
+        // AH's eigen voedingswaarde eerst: die is er meestal, is nauwkeuriger, en
+        // scheelt een productzoekopdracht per ingredient.
+        if (!(await storeAhNutrition(store, full))) {
+          const resolved = await resolveRecipe(full, client, store);
+          await store.putNutrition(full.id, resolved.total, coverageOf(resolved));
+        }
+        // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
+        if (wantedMoment && momentOf(full) !== wantedMoment) {
+          skipped++;
+          continue;
+        }
         added++;
       } catch (err) {
         errors.push(`recipe ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -665,7 +779,11 @@ async function ingest(env: Env, queries: string[], limit: number) {
     if (added >= limit) break;
   }
 
-  return { added, errors };
+  return {
+    added,
+    ...(wantedMoment ? { moment: wantedMoment, skipped } : {}),
+    errors,
+  };
 }
 
 export default {

@@ -58,8 +58,8 @@ export class Store {
     const now = Date.now();
     await this.db
       .prepare(
-        `INSERT INTO recipes (id, title, url, servings, image_url, ingredients, fetched_at, first_seen_at, tags)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO recipes (id, title, url, servings, image_url, ingredients, fetched_at, first_seen_at, tags, keywords)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -72,6 +72,10 @@ export class Store {
            tags = CASE
              WHEN json_array_length(excluded.ingredients) > 0 THEN excluded.tags
              ELSE recipes.tags
+           END,
+           keywords = CASE
+             WHEN json_array_length(excluded.keywords) > 0 THEN excluded.keywords
+             ELSE recipes.keywords
            END,
            fetched_at = excluded.fetched_at,
            first_seen_at = COALESCE(recipes.first_seen_at, excluded.first_seen_at)`,
@@ -86,6 +90,7 @@ export class Store {
         now,
         now,
         JSON.stringify(deriveTags(recipe)),
+        JSON.stringify(recipe.keywords ?? []),
       )
       .run();
   }
@@ -283,15 +288,26 @@ export class Store {
 
   // -------------------------------------------------------------- nutrition
 
-  async putNutrition(recipeId: string, n: Nutrients, coverage: number): Promise<void> {
+  /**
+   * Bewaart de voedingswaarde van een heel recept. `source` bepaalt wie wint:
+   * cijfers van AH's eigen receptpagina zijn nauwkeuriger dan wat wij uit
+   * gematchte producten optellen, dus een eigen berekening overschrijft ze niet.
+   */
+  async putNutrition(
+    recipeId: string,
+    n: Nutrients,
+    coverage: number,
+    source: "ah" | "products" = "products",
+  ): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO recipe_nutrition (recipe_id, kcal, protein, carbs, fat, fiber, coverage, computed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO recipe_nutrition (recipe_id, kcal, protein, carbs, fat, fiber, coverage, computed_at, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(recipe_id) DO UPDATE SET
            kcal = excluded.kcal, protein = excluded.protein, carbs = excluded.carbs,
            fat = excluded.fat, fiber = excluded.fiber, coverage = excluded.coverage,
-           computed_at = excluded.computed_at`,
+           computed_at = excluded.computed_at, source = excluded.source
+         WHERE excluded.source = 'ah' OR recipe_nutrition.source <> 'ah'`,
       )
       .bind(
         recipeId,
@@ -302,8 +318,23 @@ export class Store {
         n.fiber ?? 0,
         coverage,
         Date.now(),
+        source,
       )
       .run();
+  }
+
+  /** Recepten die nog geen ingredienten hebben, meestal door een geblokkeerde scrape. */
+  async recipesWithoutIngredients(limit: number): Promise<string[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT id FROM recipes
+         WHERE json_array_length(ingredients) = 0
+         ORDER BY fetched_at ASC
+         LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ id: string }>();
+    return (results ?? []).map((r) => r.id);
   }
 
   /**
@@ -402,6 +433,14 @@ export class Store {
 
   async countRecipes(): Promise<number> {
     const row = await this.db.prepare("SELECT COUNT(*) AS n FROM recipes").first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  /** Recepten die alleen als titel bestaan; die vragen om een herstelronde. */
+  async countWithoutIngredients(): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS n FROM recipes WHERE json_array_length(ingredients) = 0")
+      .first<{ n: number }>();
     return row?.n ?? 0;
   }
 

@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS recipes (
   -- Wanneer we dit recept voor het eerst zagen; overleeft elke herscrape.
   first_seen_at INTEGER,
   -- Labels afgeleid uit titel en ingredienten: eetmoment- en dieethints, JSON.
-  tags         TEXT
+  tags         TEXT,
+  -- AH's eigen labels uit het keywords-veld van de receptpagina, JSON. Dit is
+  -- hun indeling ("ontbijt", "tussendoortje") en gaat voor op onze heuristiek.
+  keywords     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -48,7 +51,11 @@ CREATE TABLE IF NOT EXISTS recipe_nutrition (
   fiber       REAL NOT NULL DEFAULT 0,
   -- Fraction of ingredients that matched a product; low values mean low trust.
   coverage    REAL NOT NULL DEFAULT 0,
-  computed_at INTEGER NOT NULL
+  computed_at INTEGER NOT NULL,
+  -- 'ah' = overgenomen van de receptpagina, 'products' = zelf opgebouwd uit
+  -- gematchte producten. AH's eigen cijfers zijn nauwkeuriger en kosten geen
+  -- productzoekopdrachten, dus die overschrijven we niet met de onze.
+  source      TEXT NOT NULL DEFAULT 'products'
 );
 
 CREATE INDEX IF NOT EXISTS idx_recipe_nutrition_protein ON recipe_nutrition(protein);

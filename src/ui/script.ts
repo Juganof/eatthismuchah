@@ -514,6 +514,23 @@ $("probe").onclick = () => run($("probe"), async () => {
   $("stats").textContent = Object.keys(r).map((k) => k + ": " + r[k]).join(" | ");
 });
 
+// Scrapen gaat bewust langzaam (AH blokkeert bursts), dus dit duurt even.
+document.querySelectorAll(".moment").forEach((button) => {
+  button.onclick = () => run(button, async () => {
+    const r = await postJson("/api/ingest", { moment: button.dataset.moment, limit: 20 });
+    const geskipt = r.skipped ? ", " + r.skipped + " vielen af (ander eetmoment)" : "";
+    toast(r.added + " recepten voor " + button.dataset.moment + geskipt + ".");
+    loadStats();
+  });
+});
+
+$("repair").onclick = () => run($("repair"), async () => {
+  const r = await postJson("/api/repair", { limit: 25 });
+  if (r.message) { toast(r.message); return; }
+  toast(r.repaired + " van " + r.examined + " aangevuld; nog " + r.remaining + " te gaan.");
+  loadStats();
+});
+
 $("reparse").onclick = () => run($("reparse"), async () => {
   const r = await postJson("/api/reparse", {});
   toast(r.recovered + " van " + r.examined + " recepten hersteld uit het archief.");
@@ -522,8 +539,11 @@ $("reparse").onclick = () => run($("reparse"), async () => {
 
 function loadStats() {
   api("/api/stats").then((s) => {
-    $("stats").textContent = s.recipes + " recepten (" + s.plannable + " bruikbaar) &middot; "
-      + s.scrapes + " scrapes bewaard, " + s.unparsed + " nog niet geparsed";
+    const leeg = s.zonderIngredienten
+      ? " &middot; " + s.zonderIngredienten + " zonder ingredienten"
+      : "";
+    $("stats").innerHTML = s.recipes + " recepten (" + s.plannable + " bruikbaar)" + leeg
+      + " &middot; " + s.scrapes + " scrapes bewaard";
   }).catch(() => {});
 }
 

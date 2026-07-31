@@ -40,6 +40,7 @@ describe("Worker routes", () => {
     expect(await response.json()).toEqual({
       recipes: 0,
       plannable: 0,
+      zonderIngredienten: 0,
       scrapes: 0,
       unparsed: 0,
     });

@@ -7,6 +7,8 @@ const PRODUCT_DETAIL_URL = "https://api.ah.nl/mobile-services/product/detail/v4/
 const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
 const RECIPE_BASE = "https://www.ah.nl/allerhande";
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Wat er gescraped werd, zodat het archief doorzoekbaar blijft per soort. */
 export type ScrapeKind = "recipe" | "recipe_search" | "product" | "product_search";
 
@@ -33,10 +35,21 @@ export class AhClient {
    * Fouten uit de callback worden ingeslikt — archiveren mag een scrape nooit
    * laten mislukken.
    */
+  private readonly minIntervalMs: number;
+  private readonly maxRetries: number;
+  private readonly backoffMs: number;
+
   constructor(
     private readonly userAgent: string,
     private readonly onRaw?: (raw: RawScrape) => void,
-  ) {}
+    options: { minIntervalMs?: number; maxRetries?: number; backoffMs?: number } = {},
+  ) {
+    // 700 ms is genoeg om onder de botbescherming te blijven en houdt een ingest
+    // van 20 recepten nog binnen een halve minuut. In tests staat het op 0.
+    this.minIntervalMs = options.minIntervalMs ?? 700;
+    this.maxRetries = options.maxRetries ?? 2;
+    this.backoffMs = options.backoffMs ?? 1500;
+  }
 
   private record(raw: RawScrape): void {
     if (!this.onRaw) return;
@@ -74,6 +87,7 @@ export class AhClient {
   /** Retries once without a cached token, so an expired token self-heals. */
   private async apiGet(url: string, archive?: { kind: ScrapeKind; ref: string }): Promise<unknown> {
     for (let attempt = 0; attempt < 2; attempt++) {
+      await this.pace();
       const res = await fetch(url, { headers: await this.authHeaders() });
       if (res.status === 401 && attempt === 0) {
         this.token = null;
@@ -89,18 +103,47 @@ export class AhClient {
     throw new Error(`GET ${url} failed after re-auth`);
   }
 
+  /**
+   * ah.nl staat achter Akamai's botbescherming. Die kijkt niet naar het totale
+   * aantal verzoeken maar naar het tempo: drie pagina's binnen een tiende
+   * seconde levert 403's op, terwijl dezelfde pagina's rustig achter elkaar
+   * gewoon binnenkomen. Vandaar een minimale tussenpoos tussen twee verzoeken
+   * en een herkansing met oplopende wachttijd als het tóch misgaat.
+   */
+  private lastRequestAt = 0;
+
+  private async pace(): Promise<void> {
+    const wait = this.minIntervalMs - (Date.now() - this.lastRequestAt);
+    if (wait > 0) await sleep(wait);
+    this.lastRequestAt = Date.now();
+  }
+
   private async htmlGet(url: string, archive?: { kind: ScrapeKind; ref: string }): Promise<string> {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": this.userAgent,
-        Accept: "text/html,application/xhtml+xml",
-        "Accept-Language": "nl-NL,nl;q=0.9",
-      },
-    });
-    const text = await res.text();
-    if (archive) this.record({ ...archive, url, status: res.status, body: text });
-    if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-    return text;
+    let lastStatus = 0;
+
+    for (let attempt = 0; attempt < this.maxRetries + 1; attempt++) {
+      await this.pace();
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": this.userAgent,
+          Accept: "text/html,application/xhtml+xml",
+          "Accept-Language": "nl-NL,nl;q=0.9",
+        },
+      });
+      const text = await res.text();
+      // Elke poging het archief in, ook de geblokkeerde: dat is precies hoe we
+      // erachter kwamen dat het om tempo ging en niet om de inhoud.
+      if (archive) this.record({ ...archive, url, status: res.status, body: text });
+      if (res.ok) return text;
+
+      lastStatus = res.status;
+      // 403 en 429 zijn "te snel", geen "bestaat niet": die zijn het proberen waard.
+      const worthRetrying = res.status === 403 || res.status === 429 || res.status >= 500;
+      if (!worthRetrying || attempt === this.maxRetries) break;
+      await sleep(this.backoffMs * 2 ** attempt);
+    }
+
+    throw new Error(`GET ${url} -> ${lastStatus}`);
   }
 
   // ---------------------------------------------------------------- products
@@ -354,6 +397,8 @@ export function collectRecipes(root: unknown): Recipe[] {
           4,
         imageUrl: findImageUrl(v),
         ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
+        keywords: parseKeywords(v["keywords"] ?? v["recipeCategory"]),
+        nutritionPerServing: parseNutritionLd(v["nutrition"]),
       });
     }
     Object.values(v).forEach(visit);
@@ -408,6 +453,49 @@ function findImageUrl(v: Record<string, unknown>): string | null {
     (x) => typeof x === "string" && /^https?:\/\/.*\.(jpg|jpeg|png|webp)/i.test(x),
   );
   return typeof img === "string" ? img : null;
+}
+
+/**
+ * AH's eigen labels. Het `keywords`-veld is één string met komma's:
+ * "gezond, vooraf te maken, brood/sandwiches, tussendoortje, grillen".
+ * Schuine strepen scheiden varianten van hetzelfde label, dus die splitsen we ook.
+ */
+export function parseKeywords(v: unknown): string[] {
+  const raw = typeof v === "string" ? v.split(",") : Array.isArray(v) ? v : [];
+  const out = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    for (const part of item.split("/")) {
+      const clean = part.trim().toLowerCase();
+      if (clean) out.add(clean);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * De voedingswaarde die AH zelf op de receptpagina zet, per portie. De waarden
+ * staan er als tekst met eenheid en toelichting ("135 kcal energie", "8 g vet"),
+ * vandaar dat `num()` het getal eruit vist.
+ *
+ * Alleen `kcal` wordt als verplicht gezien: zonder calorieën is het blok
+ * onbruikbaar voor de planner en kun je beter terugvallen op de producten.
+ */
+export function parseNutritionLd(v: unknown): Nutrients | null {
+  if (!isRecord(v)) return null;
+  const out: Nutrients = {};
+  const fields: [string, keyof Nutrients][] = [
+    ["calories", "kcal"],
+    ["proteinContent", "protein"],
+    ["carbohydrateContent", "carbs"],
+    ["fatContent", "fat"],
+    ["fiberContent", "fiber"],
+  ];
+  for (const [field, key] of fields) {
+    const value = num(v[field]);
+    if (value !== null) out[key] = value;
+  }
+  return out.kcal === undefined ? null : out;
 }
 
 export function parseIngredients(v: unknown): RawIngredient[] {

@@ -31,6 +31,25 @@ Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon geb
 Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
 en ingrediënten kun je vastzetten met `locked`.
 
+## AH's eigen gegevens gebruiken
+
+De receptpagina bevat een `ld+json`-blok van AH zelf, en daar staat meer in dan de
+ingredienten alleen:
+
+* **`keywords`** — AH's eigen labels, inclusief de menugang (`ontbijt`, `lunch`,
+  `tussendoortje`, `hoofdgerecht`). Die zijn gezaghebbend voor het eetmoment: raden op
+  de titel gaat mis, want een "Sandwich met kip" is volgens AH een tussendoortje.
+  Alleen als AH niets over de menugang zegt, valt de app terug op de titelheuristiek.
+* **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Als die er is,
+  wordt hij overgenomen en hoeft er geen enkel ingredient aan een product gekoppeld te
+  worden. Dat scheelt tientallen zoekopdrachten per recept en is bovendien
+  nauwkeuriger, dus een eigen berekening overschrijft AH's cijfers nooit
+  (`recipe_nutrition.source`).
+
+Scrapen per eetmoment gaat via `POST /api/ingest` met `{"moment":"ontbijt"}`. Er wordt
+breed gezocht en alles wordt bewaard, maar alleen wat AH zélf als dat moment labelt
+telt mee voor de limiet — de rest komt terug in `skipped`.
+
 ## Geen scrape gaat verloren
 
 `scrape_raw` bewaart van elke AH-response de ruwe HTML of JSON, met status en tijdstip,
@@ -92,6 +111,9 @@ Open de worker-URL op je telefoon. Vier tabbladen:
   Onderaan het dagtotaal tegenover je doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
   ingrediënten over alle dagen bij elkaar opgeteld, met links naar het AH-product.
+- **Database** — alles wat er in staat: recepten (met labels, voedingswaarde en welke
+  nog niet doorgerekend zijn), producten, ingredient-naar-product-koppelingen en het
+  scrape-archief. Doorzoekbaar, en de ruwe payload van elke scrape is op te vragen.
 
 ### API
 
@@ -113,6 +135,11 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `GET /api/search?q=` | Live Allerhande-zoekopdracht; bewaart wat het vindt |
 | `POST /api/ingest` | Recepten scrapen en de cache vullen |
 | `POST /api/reparse` | Recepten terughalen uit het ruwe archief |
+| `POST /api/repair` | Lege recepten alsnog ophalen (na een geblokkeerde scrape) |
+| `GET /api/browse/recipes` | Alle recepten met labels, voeding en dekking |
+| `GET /api/browse/products` | Alle producten met hun koppelingen |
+| `GET /api/browse/matches` | Ingredient naar product, missers eerst |
+| `GET /api/browse/scrapes` | Het scrape-archief; `/api/browse/raw/:id` geeft de payload |
 | `POST /api/match` | Een foute ingrediënt→product-koppeling corrigeren |
 | `GET /api/probe` | Welke AH-endpoints het nog doen |
 | `GET /api/stats` | Aantallen recepten, bruikbare recepten en bewaarde scrapes |
@@ -131,12 +158,14 @@ de ingebouwde paginastate in plaats van naar CSS-selectors — maar als resultat
 blijven, vraag dan eerst `GET /api/probe` op: die zegt welke stap stuk is. Daarna is
 `POST /api/reparse` je vangnet.
 
-**De endpoints zijn niet live geverifieerd.** Ze zijn geschreven op basis van hoe de
-AH-app werkt, maar de omgeving waarin dit gebouwd is kreeg van ah.nl een 403 terug
-(botbescherming). Reken erop dat je bij de eerste deploy `src/ah/client.ts` moet
-bijstellen; `/api/probe` en de tests in `test/parse.test.ts` zijn daarvoor het
-startpunt. Het archiveren werkt ook bij een 403: die response staat gewoon in
-`scrape_raw`.
+**ah.nl remt je af, en dat merk je aan lege recepten.** De site staat achter Akamai's
+botbescherming, die op tempo reageert en niet op aantallen: drie receptpagina's binnen
+een tiende seconde leveren 403's op, terwijl dezelfde pagina's rustig achter elkaar
+gewoon binnenkomen. Een zoekopdracht geeft alleen titels, dus als de detailpagina
+daarna geblokkeerd wordt, blijft een recept met 0 ingredienten achter. De scraper houdt
+daarom minimaal 700 ms tussen twee verzoeken aan en probeert een 403 opnieuw met
+oplopende wachttijd. Blijven er toch lege recepten staan, dan haalt
+`POST /api/repair` ze alsnog op — het aantal staat in `/api/stats`.
 
 **Voedingswaarden zijn schattingen.** Stukgewichten ("1 ui = 110 g") en dichtheden
 zijn tabelwaarden, productmatching is fuzzy, en niet elk ingrediënt heeft een
@@ -153,7 +182,7 @@ authenticatie op. Zet de worker niet op een publieke URL die je met anderen deel
 ## Ontwikkelen
 
 ```bash
-npm test          # 134 tests, geen netwerk nodig
+npm test          # 168 tests, geen netwerk nodig
 npm run typecheck
 npm run dev
 ```
