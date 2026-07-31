@@ -3,12 +3,15 @@ main = "src/index.ts"
 compatibility_date = "2026-07-30"
 compatibility_flags = ["nodejs_compat"]
 
-# Elk kwartier een kleine ronde in plaats van één grote 's nachts. ah.nl staat
-# achter Akamai en reageert op tempo, niet op aantallen: een grote ingest loopt
-# gegarandeerd tegen 403's aan, terwijl 96 kleine rondes per dag er wel doorkomen
-# en samen veel meer opleveren. Zie src/ingest/auto.ts.
+# Veel kleine rondes in plaats van één grote 's nachts. ah.nl staat achter
+# Akamai en reageert op tempo, niet op aantallen: een grote ingest loopt
+# gegarandeerd tegen 403's aan, terwijl kleine rondes met rust ertussen er wel
+# doorkomen. Het tempo zélf zit in AUTO_MIN_INTERVAL_MS (nu gedeeld over alle
+# aanroepen, zie src/ah/client.ts) — hoe vaak de cron aftrapt is daar los van:
+# een ronde van 8 recepten duurt ruim op zijn tempo een seconde of 10, dus elke
+# 2 minuten laat ruim voldoende lucht. Zie src/ingest/auto.ts.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/2 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -33,3 +36,6 @@ AUTO_DAILY_MAX = "250"
 AUTO_MIN_INTERVAL_MS = "700"
 # Hoe lang er niets gebeurt nadat AH ons geblokkeerd heeft.
 AUTO_COOLDOWN_MS = "1800000"
+# Bovengrens voor de afkoelperiode: blokkeert AH ons meteen weer zodra we het
+# opnieuw proberen, dan verdubbelt AUTO_COOLDOWN_MS elke keer tot hier aan toe.
+AUTO_MAX_COOLDOWN_MS = "14400000"

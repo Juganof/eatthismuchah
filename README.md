@@ -110,10 +110,15 @@ hoe beter de dagmenu's worden.
 
 ## Automatisch bijvullen
 
-Elk kwartier draait een kleine ronde, de hele dag door. Dat is geen willekeurige
-keuze: ah.nl staat achter Akamai en reageert op tempo, niet op aantallen. Eén grote
-nachtelijke ingest loopt gegarandeerd tegen 403's aan, terwijl 96 kleine rondes met
-rust ertussen er wél doorkomen en samen veel meer opleveren.
+Elke 2 minuten draait een kleine ronde, de hele dag door. Dat is geen
+willekeurige keuze, maar ook geen tegenspraak met "ah.nl reageert op tempo,
+niet op aantallen": het tempo zit in `AUTO_MIN_INTERVAL_MS`, de rust tussen
+twee verzoeken aan ah.nl zelf, en die geldt inmiddels voor de hele Worker samen
+in plaats van per aanroep (zie `src/ah/client.ts`). Hoe vaak de cron aftrapt
+staat daar los van — een ronde van 8 recepten duurt op dat tempo maar een
+seconde of 10, dus elke 2 minuten laat ruim voldoende lucht, en levert over de
+dag veel meer op dan één grote nachtelijke ingest, die gegarandeerd tegen
+403's aanloopt.
 
 Een ronde doet één ding:
 
@@ -125,12 +130,15 @@ Een ronde doet één ding:
 
 Twee remmen zitten erop. Een **dagbudget** (`AUTO_DAILY_MAX`, standaard 250 recepten)
 zodat de automaat niet eindeloos doorhamert, en een **afkoelperiode**: blokkeert AH ons
-toch, dan ligt het bijvullen een half uur stil. Doorgaan alsof er niets aan de hand is
-maakt het namelijk alleen erger.
+toch, dan ligt het bijvullen stil. Doorgaan alsof er niets aan de hand is maakt het
+namelijk alleen erger — en blokkeert AH ons meerdere keren op rij, dan verdubbelt die
+afkoelperiode elke keer (tot aan `AUTO_MAX_COOLDOWN_MS`) in plaats van steeds hetzelfde
+te proberen.
 
 Alles is in te stellen via `[vars]` in `wrangler.toml`: `AUTO_BATCH` (recepten per
 ronde), `AUTO_DAILY_MAX`, `AUTO_MIN_INTERVAL_MS` (rust tussen twee verzoeken),
-`AUTO_BACKOFF_MS` en `AUTO_COOLDOWN_MS`.
+`AUTO_BACKOFF_MS`, `AUTO_COOLDOWN_MS` en `AUTO_MAX_COOLDOWN_MS`. Hoe vaak de cron zelf
+aftrapt staat in `[triggers]` &rarr; `crons` in `wrangler.toml`.
 
 Op het profieltabblad staat wat de automaat doet: wat er vandaag binnenkwam, hoeveel
 lege recepten er nog open staan, welk eetmoment hierna aan de beurt is, en de laatste
