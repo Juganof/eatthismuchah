@@ -140,6 +140,16 @@ function normaliseUnit(unit: string | null): string {
   return (unit ?? "").toLowerCase().replace(/\.$/, "").trim();
 }
 
+/**
+ * Whether a word is a real unit (g, el, stuk, ...) rather than a stray adjective a
+ * naive "quantity, word, rest" split would otherwise mistake for one — e.g. "rijpe"
+ * in "3 rijpe bananen".
+ */
+export function isKnownUnit(word: string): boolean {
+  const unit = normaliseUnit(word);
+  return unit in MASS_G || unit in VOLUME_ML || unit === "x" || PIECE_UNITS.has(unit);
+}
+
 /** Picks the best density match by looking for any known word inside the name. */
 export function densityFor(name: string): number {
   const n = name.toLowerCase();

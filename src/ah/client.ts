@@ -1,4 +1,5 @@
 import type { Nutrients, Product, RawIngredient, Recipe } from "./types";
+import { isKnownUnit } from "../nutrition/units";
 import { deepFind, extractEmbeddedJson } from "./scrape";
 
 const AUTH_URL = "https://api.ah.nl/mobile-auth/v1/auth/token/anonymous";
@@ -522,16 +523,20 @@ export function parseIngredients(v: unknown): RawIngredient[] {
   return out;
 }
 
-/** Parses a free-text line like "250 g kipfilet" or "2 el olijfolie". */
+/**
+ * Parses a free-text line like "250 g kipfilet" or "2 el olijfolie". The word right
+ * after the quantity is only taken as a unit when it actually is one — otherwise
+ * ("3 rijpe bananen") it's an adjective and belongs in the name, with no unit.
+ */
 export function parseIngredientText(text: string): RawIngredient {
-  const m = text
-    .trim()
-    .toLowerCase()
-    .match(/^(\d+(?:[.,]\d+)?)\s*([a-z]+\.?)?\s+(.*)$/);
-  if (!m || !m[1] || !m[3]) return { name: text.trim().toLowerCase(), quantity: null, unit: null };
-  return {
-    quantity: Number(m[1].replace(",", ".")),
-    unit: m[2] ?? null,
-    name: m[3].trim(),
-  };
+  const m = text.trim().toLowerCase().match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/);
+  if (!m || !m[1] || !m[2]) return { name: text.trim().toLowerCase(), quantity: null, unit: null };
+
+  const quantity = Number(m[1].replace(",", "."));
+  const rest = m[2].trim();
+  const wordMatch = rest.match(/^([a-z]+\.?)\s+(.+)$/);
+  if (wordMatch && wordMatch[1] && wordMatch[2] && isKnownUnit(wordMatch[1])) {
+    return { quantity, unit: wordMatch[1], name: wordMatch[2].trim() };
+  }
+  return { quantity, unit: null, name: rest };
 }

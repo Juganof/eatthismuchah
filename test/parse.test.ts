@@ -63,6 +63,25 @@ describe("parseIngredientText", () => {
       name: "peper en zout",
     });
   });
+
+  it("doesn't mistake a leading adjective for a unit", () => {
+    // "rijpe" is not a unit, so it stays part of the name and there is no unit —
+    // this used to get parsed as unit "rijpe", which then failed every unit lookup
+    // and silently fell back to a guessed gram weight.
+    expect(parseIngredientText("3 rijpe bananen")).toEqual({
+      quantity: 3,
+      unit: null,
+      name: "rijpe bananen",
+    });
+  });
+
+  it("still recognises a real unit followed by a descriptive name", () => {
+    expect(parseIngredientText("2 el gehakte peterselie")).toEqual({
+      quantity: 2,
+      unit: "el",
+      name: "gehakte peterselie",
+    });
+  });
 });
 
 describe("parseNutrition", () => {
