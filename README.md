@@ -106,14 +106,18 @@ npm run db:init                            # maakt de tabellen aan
 npm run deploy
 ```
 
-Werk je op een database die er al stond vóór de planner, draai dan de migratie:
+Werk je op een database die er al stond, draai dan de migraties — dat is nodig na
+elke update die er een toevoegt (nu tot en met `0004_app_logs.sql`, voor de
+applicatielog):
 
 ```bash
-npx wrangler d1 execute ah-macro-planner --remote --file=./migrations/0001_planner.sql
+npm run db:migrate          # alle migraties op de remote database
+npm run db:migrate:local    # of lokaal
 ```
 
-De twee `ALTER TABLE`-regels onderaan die migratie falen met "duplicate column name"
-als ze er al zijn; dat is verwacht en betekent dat je klaar bent.
+De `ALTER TABLE`-regels in `0002` falen met "duplicate column name" als de kolommen er
+al zijn; dat is verwacht en betekent dat je klaar bent. Daarom staan de migraties met
+`;` achter elkaar en niet met `&&`: zo loopt de rest gewoon door.
 
 Daarna eenmalig vullen — dit is de trage stap, want elk nieuw ingrediënt kost een
 productlookup:
