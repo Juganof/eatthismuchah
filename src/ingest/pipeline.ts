@@ -2,7 +2,12 @@ import { AhClient } from "../ah/client";
 import type { Nutrients, Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
-import { coverageOf, lookupIngredientMatch, resolveRecipe } from "../nutrition/resolve";
+import {
+  coverageOf,
+  lookupIngredientMatch,
+  lookupLinkedProduct,
+  resolveRecipe,
+} from "../nutrition/resolve";
 
 /**
  * Het scrapen zelf, los van de routes. Zowel de knoppen in de UI als de
@@ -224,8 +229,10 @@ export interface EnrichResult {
  * (`computeNutrition` hierboven): daar nemen we AH's eigen voedingswaarde over
  * en doen we nul productzoekopdrachten. Zonder deze aparte, lager-prioriteit
  * ronde blijft `ingredient_matches` voor bijna elk recept leeg, en kan de
- * planner dus nooit "meer kwark, minder granola" — alleen alles met dezelfde
- * factor schalen (zie `planUniform` in `src/optimize/plan.ts`).
+ * planner dus nooit "meer kwark, minder granola". Erger nog: zonder koppelingen
+ * komt zo'n recept helemaal niet in een dagmenu, want `planFor` in
+ * `src/optimize/day.ts` slaat alles over waarvan de voedingswaarde niet per
+ * ingredient bekend is.
  */
 export async function enrichIngredientMatches(
   env: ScrapeEnv,
@@ -242,8 +249,17 @@ export async function enrichIngredientMatches(
   let blocked = 0;
   const errors: string[] = [];
 
-  for (const { name } of names) {
+  for (const { name, productId } of names) {
     try {
+      // Heeft AH bij het recept zelf al een product aangewezen, dan is dat het:
+      // één detailaanroep in plaats van zoeken plus raden, en zonder foutmarge.
+      if (productId) {
+        const linked = await lookupLinkedProduct(name, productId, client, store);
+        if (linked) {
+          matched++;
+          continue;
+        }
+      }
       const { outcome } = await lookupIngredientMatch(name, client, store);
       if (outcome === "matched") matched++;
       else unmatched++;

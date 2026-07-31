@@ -5,8 +5,9 @@ import {
   parseNutrition,
   parseNutritionHtml,
   parseRecipeCards,
+  productIdFrom,
 } from "../src/ah/client";
-import { deepFind, extractEmbeddedJson } from "../src/ah/scrape";
+import { deepFind, extractEmbeddedJson, extractFlightJson } from "../src/ah/scrape";
 
 describe("extractEmbeddedJson", () => {
   it("pulls the Next.js state out of a page", () => {
@@ -181,8 +182,8 @@ describe("collectRecipes", () => {
     expect(recipe?.id).toBe("R-R1193067");
     expect(recipe?.servings).toBe(4);
     expect(recipe?.ingredients).toEqual([
-      { name: "kipfilet", quantity: 500, unit: "g" },
-      { name: "rijst", quantity: 300, unit: "g" },
+      { name: "kipfilet", quantity: 500, unit: "g", productId: null },
+      { name: "rijst", quantity: 300, unit: "g", productId: null },
     ]);
   });
 
@@ -240,5 +241,41 @@ describe("parseRecipeCards", () => {
         ingredients: [],
       },
     ]);
+  });
+});
+
+describe("productkoppeling per ingredient", () => {
+  it("leest de flight-chunks van AH's App Router als paginastate", () => {
+    const payload = JSON.stringify({ recipe: { id: 5, title: "X", ingredients: [] } });
+    const row = JSON.stringify(`3:${payload}\n`);
+    const html = `<script>self.__next_f.push([1,${row}])</script>`;
+    expect(extractFlightJson(html)).toEqual([{ recipe: { id: 5, title: "X", ingredients: [] } }]);
+  });
+
+  it("plakt een payload die over twee chunks verdeeld is weer aan elkaar", () => {
+    const html =
+      `<script>self.__next_f.push([1,${JSON.stringify('4:{"a":')}])</script>` +
+      `<script>self.__next_f.push([1,${JSON.stringify("1}\n")}])</script>`;
+    expect(extractFlightJson(html)).toEqual([{ a: 1 }]);
+  });
+
+  it("neemt het webshop-id over dat AH zelf aan de receptregel hangt", () => {
+    const [recipe] = collectRecipes({
+      id: 42,
+      title: "Kwarkontbijt",
+      servings: 1,
+      ingredients: [
+        { name: "kwark", quantity: 150, unit: "g", productId: 445566 },
+        { name: "banaan", quantity: 1, unit: null, product: { webshopId: "778899" } },
+        { name: "peper", quantity: null, unit: null },
+      ],
+    });
+    expect(recipe?.ingredients.map((i) => i.productId)).toEqual(["445566", "778899", null]);
+  });
+
+  it("negeert een id dat geen webshop-id kan zijn", () => {
+    expect(productIdFrom({ productId: "abc" })).toBeNull();
+    expect(productIdFrom({ productId: 0 })).toBeNull();
+    expect(productIdFrom({ products: [{ id: 12 }] })).toBe("12");
   });
 });

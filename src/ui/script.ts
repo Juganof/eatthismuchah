@@ -269,26 +269,18 @@ function planCard(meal) {
       + '</div>';
   }
 
-  // In uniforme modus heeft geen enkel ingredient een eigen match, dus is een
-  // vlag per regel ruis in plaats van informatie — die regels krijgen in
-  // plaats daarvan één uitleg hieronder.
   const rows = p.ingredients.map((i) => {
-    const flag = p.scalingMode === "solver" && i.unmatched
+    const flag = i.unmatched
       ? ' <span class="muted">(geen voedingswaarde)</span>'
       : '';
     return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span><span class="amt">' + amountFor(i) + '</span></div>';
   }).join("");
 
-  const scalingNote = p.scalingMode === "uniform"
-    ? '<p class="muted">De voedingswaarde van dit recept komt van AH zelf en klopt dus. Welk '
-      + 'ingredi\\u00ebnt welke macro levert weten we nog niet, dus is alles met dezelfde factor ('
-      + '\\u00d7' + formatQty(uniformFactor(p)) + ') geschaald in plaats van per ingredi\\u00ebnt. '
-      + 'Zodra de koppelingen zijn aangevuld kan de planner w\\u00e9l gericht bijsturen.</p>'
-    : p.coverage < 0.8
-      ? '<p class="note">Let op: voor ' + Math.round((1 - p.coverage) * 100)
-        + '% van het gewicht (de gemarkeerde regels) is geen voedingswaarde gevonden, dus is de '
-        + 'bijdrage van die ingredi\\u00ebnten een onderschatting.</p>'
-      : "";
+  const scalingNote = p.coverage < 0.8
+    ? '<p class="note">Let op: voor ' + Math.round((1 - p.coverage) * 100)
+      + '% van het gewicht (de gemarkeerde regels) is geen voedingswaarde gevonden, dus is de '
+      + 'bijdrage van die ingredi\\u00ebnten een onderschatting.</p>'
+    : "";
 
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
     + mealHead(meal)
@@ -304,17 +296,8 @@ function planCard(meal) {
     + '</div></div>';
 }
 
-/** In uniforme modus schaalt elk ingredient met dezelfde factor; pak 'm van de eerste. */
-function uniformFactor(plan) {
-  return plan.ingredients.length ? plan.ingredients[0].scale : 1;
-}
-
 /** Korte samenvatting van hoeveel er aan een plan is gesleuteld. */
 function scaleSummary(plan) {
-  if (plan.scalingMode === "uniform") {
-    const factor = uniformFactor(plan);
-    return Math.abs(factor - 1) > 0.05 ? "alles \\u00d7 " + formatQty(factor) : "ongewijzigd";
-  }
   const changed = plan.ingredients.filter((i) => Math.abs(i.scale - 1) > 0.05).length;
   return changed === 0
     ? "ongewijzigd"
@@ -783,6 +766,14 @@ $("enrich").onclick = () => run($("enrich"), async () => {
   loadAutoStatus();
 });
 
+$("purge").onclick = () => run($("purge"), async () => {
+  // graceMs 0: nu opruimen, niet pas na de respijtperiode van de automaat.
+  const r = await postJson("/api/purge", { graceMs: 0 });
+  toast(r.purged + " onbruikbare recepten weggegooid; nog " + r.remaining + " te gaan.");
+  loadStats();
+  loadAutoStatus();
+});
+
 $("reparse").onclick = () => run($("reparse"), async () => {
   const r = await postJson("/api/reparse", {});
   toast(r.recovered + " van " + r.examined + " recepten hersteld uit het archief.");
@@ -797,6 +788,7 @@ function renderAutoStatus(s) {
     + '<span class="macro">rondes <b>' + (v.runs || 0) + '</b></span>'
     + '<span class="macro">nog leeg <b>' + s.openLegeRecepten + '</b></span>'
     + '<span class="macro">nog koppelingen <b>' + (s.openKoppelingen || 0) + '</b></span>'
+    + '<span class="macro">op te ruimen <b>' + (s.onbruikbareRecepten || 0) + '</b></span>'
     + '<span class="macro">hierna <b>' + escapeHtml(s.volgende || "-") + '</b></span>'
     + '</div>';
 
@@ -862,7 +854,8 @@ function loadStats() {
     const leeg = s.zonderIngredienten
       ? " &middot; " + s.zonderIngredienten + " zonder ingredienten"
       : "";
-    $("stats").innerHTML = s.recipes + " recepten (" + s.plannable + " bruikbaar)" + leeg
+    const vuil = s.onbruikbaar ? " &middot; " + s.onbruikbaar + " op te ruimen" : "";
+    $("stats").innerHTML = s.recipes + " recepten (" + s.plannable + " bruikbaar)" + leeg + vuil
       + " &middot; " + s.scrapes + " scrapes bewaard";
   }).catch(() => {});
 }

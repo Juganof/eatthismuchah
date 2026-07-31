@@ -348,7 +348,8 @@ export class Store {
    * dus zonder dit loopt `ingredient_matches` voor bijna geen enkel recept vol.
    */
   private ingredientNamesWithoutMatchQuery(): string {
-    return `SELECT json_extract(ing.value, '$.name') AS name, COUNT(*) AS uses
+    return `SELECT json_extract(ing.value, '$.name') AS name, COUNT(*) AS uses,
+              MAX(json_extract(ing.value, '$.productId')) AS product_id
        FROM recipes r, json_each(r.ingredients) AS ing
        WHERE json_extract(ing.value, '$.name') IS NOT NULL
          AND NOT EXISTS (
@@ -358,12 +359,18 @@ export class Store {
        GROUP BY name`;
   }
 
-  async ingredientNamesWithoutMatch(limit: number): Promise<{ name: string; uses: number }[]> {
+  async ingredientNamesWithoutMatch(
+    limit: number,
+  ): Promise<{ name: string; uses: number; productId: string | null }[]> {
     const { results } = await this.db
       .prepare(`${this.ingredientNamesWithoutMatchQuery()} ORDER BY uses DESC, name ASC LIMIT ?`)
       .bind(Date.now() - MATCH_TTL_MS, limit)
-      .all<{ name: string; uses: number }>();
-    return results ?? [];
+      .all<{ name: string; uses: number; product_id: string | number | null }>();
+    return (results ?? []).map((r) => ({
+      name: r.name,
+      uses: r.uses,
+      productId: r.product_id === null ? null : String(r.product_id),
+    }));
   }
 
   async countIngredientNamesWithoutMatch(): Promise<number> {
@@ -412,7 +419,15 @@ export class Store {
       recentSinceDays = 10,
     } = options;
 
-    const conditions = ["n.coverage >= ?", "n.kcal > 0", "COALESCE(p.status, '') <> 'blocked'"];
+    // De laatste voorwaarde houdt recepten buiten de lijst waar de planner toch
+    // niets mee kan; zonder die filter vullen ze de kandidatenlimiet met
+    // gerechten die daarna alsnog afvallen.
+    const conditions = [
+      "n.coverage >= ?",
+      "n.kcal > 0",
+      "COALESCE(p.status, '') <> 'blocked'",
+      Store.HAS_REAL_INGREDIENT_NUTRITION,
+    ];
     const params: unknown[] = [minCoverage];
 
     // Een band rondom het doel: alles daarbuiten kan de solver niet fatsoenlijk
@@ -481,9 +496,98 @@ export class Store {
     return row?.n ?? 0;
   }
 
+  /**
+   * De ids van recepten waar de planner niets mee kan, en die ook niet meer in de
+   * pijplijn zitten. Onbruikbaar betekent één van drie dingen:
+   *
+   *   1. geen ingredientenlijst — een titel alleen is niets waard;
+   *   2. geen doorgerekende voedingswaarde, of nul calorieen;
+   *   3. geen enkel ingredient met echte productvoedingswaarde erachter.
+   *
+   * Bij (3) telt alleen mee wat af is: zolang er nog een ingredientnaam open
+   * staat om opgezocht te worden, is dit recept niet onbruikbaar maar gewoon nog
+   * niet klaar. Daar bovenop een respijtperiode, want een recept dat net binnen
+   * is heeft de herstel- en koppelrondes nog niet gehad.
+   *
+   * Wat de gebruiker zelf heeft aangeraakt — een opgeslagen dag, een favoriet —
+   * blijft altijd staan.
+   */
+  /**
+   * Waar of niet: heeft dit recept minstens één ingredient met echte
+   * productvoedingswaarde erachter? Dat is de enige grond waarop de planner
+   * rekent, dus zowel de kandidatenlijst als de tellingen gebruiken dit.
+   */
+  private static readonly HAS_REAL_INGREDIENT_NUTRITION = `EXISTS (
+             SELECT 1 FROM json_each(r.ingredients) ing
+             JOIN ingredient_matches m ON m.ingredient_name = json_extract(ing.value, '$.name')
+             JOIN products pr ON pr.webshop_id = m.webshop_id
+             WHERE json_extract(pr.per_100g, '$.kcal') IS NOT NULL
+           )`;
+
+  private unusableRecipeIdsQuery(): string {
+    return `SELECT r.id FROM recipes r
+       WHERE COALESCE(r.first_seen_at, r.fetched_at) <= ?
+         AND NOT EXISTS (SELECT 1 FROM saved_day_meals sm WHERE sm.recipe_id = r.id)
+         AND NOT EXISTS (SELECT 1 FROM recipe_prefs rp WHERE rp.recipe_id = r.id AND rp.status = 'fav')
+         AND (
+           json_array_length(r.ingredients) = 0
+           OR NOT EXISTS (SELECT 1 FROM recipe_nutrition n WHERE n.recipe_id = r.id AND n.kcal > 0)
+           OR (
+             NOT EXISTS (
+               SELECT 1 FROM json_each(r.ingredients) ing
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM ingredient_matches m
+                 WHERE m.ingredient_name = json_extract(ing.value, '$.name')
+               )
+             )
+             AND NOT ${Store.HAS_REAL_INGREDIENT_NUTRITION}
+           )
+         )`;
+  }
+
+  async countUnusableRecipes(graceMs: number): Promise<number> {
+    const row = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM (${this.unusableRecipeIdsQuery()})`)
+      .bind(Date.now() - graceMs)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  /**
+   * Gooit die recepten weg, inclusief hun doorgerekende voedingswaarde. Het
+   * scrape-archief blijft ongemoeid: dat is de enige tabel die we nooit legen,
+   * dus een weggegooid recept is altijd nog terug te halen zonder ah.nl opnieuw
+   * te bevragen.
+   */
+  async purgeUnusableRecipes(graceMs: number, limit = 500): Promise<number> {
+    const { results } = await this.db
+      .prepare(`${this.unusableRecipeIdsQuery()} LIMIT ?`)
+      .bind(Date.now() - graceMs, limit)
+      .all<{ id: string }>();
+    const ids = (results ?? []).map((r) => r.id);
+    if (ids.length === 0) return 0;
+
+    const holes = ids.map(() => "?").join(", ");
+    await this.db
+      .prepare(`DELETE FROM recipe_nutrition WHERE recipe_id IN (${holes})`)
+      .bind(...ids)
+      .run();
+    await this.db.prepare(`DELETE FROM recipes WHERE id IN (${holes})`).bind(...ids).run();
+    return ids.length;
+  }
+
+  /**
+   * Bruikbaar = de planner kan er echt iets mee. Een recept waarvan alleen AH's
+   * portietotaal bekend is telt dus niet mee, hoe netjes dat cijfer er ook
+   * uitziet: zonder voedingswaarde per ingredient valt er niets te plannen.
+   */
   async countPlannable(): Promise<number> {
     const row = await this.db
-      .prepare("SELECT COUNT(*) AS n FROM recipe_nutrition WHERE coverage >= 0.5 AND kcal > 0")
+      .prepare(
+        `SELECT COUNT(*) AS n FROM recipe_nutrition n
+         JOIN recipes r ON r.id = n.recipe_id
+         WHERE n.coverage >= 0.5 AND n.kcal > 0 AND ${Store.HAS_REAL_INGREDIENT_NUTRITION}`,
+      )
       .first<{ n: number }>();
     return row?.n ?? 0;
   }

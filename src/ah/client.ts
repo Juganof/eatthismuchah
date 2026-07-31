@@ -526,9 +526,39 @@ export function parseIngredients(v: unknown): RawIngredient[] {
       name: name.toLowerCase(),
       quantity: num(isRecord(q) ? (q["amount"] ?? q["value"]) : q),
       unit: str(isRecord(item["unit"]) ? item["unit"]["name"] : item["unit"]),
+      productId: productIdFrom(item),
     });
   }
   return out;
+}
+
+/**
+ * AH hangt aan een receptregel zijn eigen webshopproduct — dat is wat de
+ * "bestel de ingrediënten"-knop gebruikt. Het veld heet niet overal hetzelfde,
+ * dus we kijken naar de plekken waar het door de jaren heen gestaan heeft, en
+ * accepteren alleen een numeriek webshop-id (dat is wat de detail-API wil).
+ */
+export function productIdFrom(item: Record<string, unknown>): string | null {
+  const direct =
+    item["productId"] ??
+    item["webshopId"] ??
+    item["shoppableProductId"] ??
+    item["defaultProductId"];
+  const nested = isRecord(item["product"])
+    ? (item["product"]["webshopId"] ?? item["product"]["id"])
+    : undefined;
+  const first = Array.isArray(item["products"]) && isRecord(item["products"][0])
+    ? ((item["products"][0] as Record<string, unknown>)["webshopId"] ??
+       (item["products"][0] as Record<string, unknown>)["id"])
+    : undefined;
+
+  for (const candidate of [direct, nested, first]) {
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) {
+      return String(candidate);
+    }
+    if (typeof candidate === "string" && /^\d+$/.test(candidate.trim())) return candidate.trim();
+  }
+  return null;
 }
 
 /**

@@ -14,6 +14,13 @@ export interface RawIngredient {
   quantity: number | null;
   /** AH's unit string, e.g. "g", "ml", "el", "stuk". Null when AH gives none. */
   unit: string | null;
+  /**
+   * Het webshop-id van het product dat AH zelf aan deze regel hangt — de
+   * "bestel de ingrediënten"-link op de receptpagina. Als die er is hoeven we
+   * niet te zoeken en te raden welk product bedoeld wordt: dit is AH's eigen
+   * koppeling en dus per definitie de juiste.
+   */
+  productId?: string | null;
 }
 
 export interface Recipe {

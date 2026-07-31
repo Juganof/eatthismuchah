@@ -5,6 +5,7 @@ import { DEFAULT_SLOTS } from "../src/nutrition/split";
 import type { DailyTargets } from "../src/nutrition/targets";
 import { blankDay, generateDay, rerollSlot } from "../src/optimize/day";
 import { createTestDb, type TestDb } from "./helpers/d1";
+import { FOODS, seedRecipes } from "./helpers/seed";
 
 /**
  * Plannen mag ah.nl nooit aanraken.
@@ -68,12 +69,34 @@ async function seedUnmatched(store: Store): Promise<void> {
   }
 }
 
+/** Dezelfde recepten, maar met echte productvoedingswaarde per ingredient. */
+async function seedPlannable(store: Store): Promise<void> {
+  await seedRecipes(store, [
+    { id: "R-R1", title: "Kwark met granola", servings: 2, ingredients: [
+      { name: "kwark", grams: 300, per100g: FOODS.kwark! },
+      { name: "havermout", grams: 80, per100g: FOODS.havermout! },
+    ] },
+    { id: "R-R2", title: "Kip met rijst", servings: 2, ingredients: [
+      { name: "kipfilet", grams: 300, per100g: FOODS.kipfilet! },
+      { name: "rijst", grams: 150, per100g: FOODS.rijst! },
+    ] },
+    { id: "R-R3", title: "Pasta pesto", servings: 2, ingredients: [
+      { name: "rijst", grams: 250, per100g: FOODS.rijst! },
+      { name: "olijfolie", grams: 30, per100g: FOODS.olijfolie! },
+    ] },
+    { id: "R-R4", title: "Soep met brood", servings: 2, ingredients: [
+      { name: "broccoli", grams: 200, per100g: FOODS.broccoli! },
+      { name: "kwark", grams: 100, per100g: FOODS.kwark! },
+    ] },
+  ]);
+}
+
 describe("planning without the network", () => {
   it("generates a whole day from the database alone", async () => {
     const fetchMock = explodingFetch();
     db = createTestDb();
     const store = new Store(db);
-    await seedUnmatched(store);
+    await seedPlannable(store);
 
     const day = await generateDay(store, client, {
       date: "2026-08-01",
@@ -85,7 +108,7 @@ describe("planning without the network", () => {
     expect(day.meals.filter((m) => m.plan)).not.toHaveLength(0);
   });
 
-  it("uses AH's own totals when the ingredients have no products", async () => {
+  it("plant niets op een recept waarvan alleen het totaal bekend is", async () => {
     explodingFetch();
     db = createTestDb();
     const store = new Store(db);
@@ -97,43 +120,23 @@ describe("planning without the network", () => {
       daily,
     });
 
-    // Zonder de terugval op het totaal zou elk plan op nul calorieën uitkomen.
-    for (const meal of day.meals) {
-      if (!meal.plan) continue;
-      expect(meal.plan.perPortion.kcal, meal.slotName).toBeGreaterThan(0);
-      expect(meal.plan.coverage, meal.slotName).toBe(1);
-      // Geen enkel ingredient is gematcht, dus is dit per definitie het uniforme
-      // pad — de UI gebruikt dit veld om "(geen voedingswaarde)" per regel te
-      // onderdrukken en in plaats daarvan één uitleg te tonen.
-      expect(meal.plan.scalingMode, meal.slotName).toBe("uniform");
-    }
-    expect(day.totals.kcal).toBeGreaterThan(0);
-  });
-
-  it("scales the dish as a whole towards the target", async () => {
-    explodingFetch();
-    db = createTestDb();
-    const store = new Store(db);
-    await seedUnmatched(store);
-
-    const plan = await rerollSlot(store, client, {
-      targets: { kcal: 300, protein: 25, carbs: 30, fat: 8, fiber: 4 },
-      excludeRecipeIds: [],
-    });
-
-    expect(plan).not.toBeNull();
-    // Elk ingredient krijgt dezelfde factor: je maakt een kleinere pan.
-    const factors = new Set(plan!.ingredients.map((i) => i.scale));
-    expect(factors.size).toBe(1);
-    // En het resultaat ligt dichter bij 300 kcal dan het ongeschaalde recept.
-    expect(plan!.perPortion.kcal!).toBeLessThan(500);
+    // AH's portietotaal is een echt cijfer, maar het zegt niets over welk
+    // ingredient welke macro levert. Zonder dat valt er niets te plannen, en
+    // een voorstel doen alsof dat wel kon is precies wat hier niet meer mag.
+    expect(day.meals.every((m) => m.plan === null)).toBe(true);
+    expect(
+      await rerollSlot(store, client, {
+        targets: { kcal: 300, protein: 25, carbs: 30, fat: 8, fiber: 4 },
+        excludeRecipeIds: [],
+      }),
+    ).toBeNull();
   });
 
   it("rerolls without touching the network either", async () => {
     const fetchMock = explodingFetch();
     db = createTestDb();
     const store = new Store(db);
-    await seedUnmatched(store);
+    await seedPlannable(store);
 
     const plan = await rerollSlot(store, client, {
       targets: { kcal: 600, protein: 45, carbs: 60, fat: 20, fiber: 8 },

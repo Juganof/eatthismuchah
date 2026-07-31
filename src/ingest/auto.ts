@@ -52,6 +52,15 @@ export interface AutoConfig {
   /** Ingredientnamen per enrichment-ronde. */
   enrichBatch: number;
   /**
+   * Hoe lang een recept de tijd krijgt om bruikbaar te worden voordat het wordt
+   * opgeruimd. Een net binnengehaald recept heeft de herstel- en koppelrondes nog
+   * niet gehad; pas daarna is "geen ingredienten of geen echte voedingswaarde"
+   * ook echt een eindstand.
+   */
+  purgeGraceMs: number;
+  /** Hoeveel onbruikbare recepten er per ronde weggaan. */
+  purgeBatch: number;
+  /**
    * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
    * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
    * zou enrichment nooit laten draaien, want de eetmoment-rotatie heeft altijd
@@ -69,6 +78,8 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   backoffMs: 1500,
   enrichBatch: 6,
   enrichEvery: 3,
+  purgeGraceMs: 24 * 60 * 60 * 1000,
+  purgeBatch: 200,
 };
 
 export interface AutoResult {
@@ -76,6 +87,8 @@ export interface AutoResult {
   /** Waarom er niets gebeurde, als er niets gebeurde. */
   reason?: string;
   mode?: "repair" | "moment" | "enrich";
+  /** Recepten die deze ronde zijn weggegooid omdat er niets bruikbaars in stond. */
+  purged?: number;
   detail?: string;
   added?: number;
   repaired?: number;
@@ -101,6 +114,8 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     backoffMs: read("AUTO_BACKOFF_MS", DEFAULT_AUTO_CONFIG.backoffMs),
     enrichBatch: read("AUTO_ENRICH_BATCH", DEFAULT_AUTO_CONFIG.enrichBatch),
     enrichEvery: read("AUTO_ENRICH_EVERY", DEFAULT_AUTO_CONFIG.enrichEvery),
+    purgeGraceMs: read("AUTO_PURGE_GRACE_MS", DEFAULT_AUTO_CONFIG.purgeGraceMs),
+    purgeBatch: read("AUTO_PURGE_BATCH", DEFAULT_AUTO_CONFIG.purgeBatch),
   };
 }
 
@@ -129,6 +144,12 @@ export async function runAutoIngest(
     }
   }
 
+  // Opruimen eerst, en elke ronde: het kost geen enkel verzoek aan ah.nl en
+  // houdt alles wat daarna komt (herstellen, koppelen, plannen) aan het werk op
+  // recepten waar echt iets in zit. Zie `purgeUnusableRecipes` voor wat er weg
+  // mag — favorieten en opgeslagen dagen blijven altijd staan.
+  const purged = await store.purgeUnusableRecipes(config.purgeGraceMs, config.purgeBatch);
+
   const clientOptions = { minIntervalMs: config.minIntervalMs, backoffMs: config.backoffMs };
   // Lege recepten eerst: die kosten één pagina en leveren meteen een bruikbaar
   // recept op, terwijl nieuw zoeken pas na de detailpagina iets oplevert.
@@ -142,6 +163,7 @@ export async function runAutoIngest(
     return {
       ran: true,
       mode: "repair",
+      purged,
       detail: `${empty} lege recepten open`,
       repaired: result.repaired,
       blocked: result.blocked,
@@ -165,6 +187,7 @@ export async function runAutoIngest(
       return {
         ran: true,
         mode: "enrich",
+        purged,
         detail: `${openNames} koppelingen open`,
         enriched: result.matched,
         blocked: result.blocked,
@@ -190,6 +213,7 @@ export async function runAutoIngest(
   return {
     ran: true,
     mode: "moment",
+    purged,
     detail: `${moment}: ${query}`,
     added: result.added,
     blocked: result.blocked,
@@ -235,6 +259,7 @@ export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AU
     vandaag: today,
     dagbudget: config.dailyMax,
     openLegeRecepten: await store.countWithoutIngredients(),
+    onbruikbareRecepten: await store.countUnusableRecipes(config.purgeGraceMs),
     openKoppelingen: await store.countIngredientNamesWithoutMatch(),
     afkoelenTot: cooldownUntil > Date.now() ? cooldownUntil : null,
     blokkadesOpEenRij: Number((await store.getState(BLOCK_STREAK)) ?? 0),

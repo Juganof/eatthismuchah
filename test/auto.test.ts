@@ -314,3 +314,48 @@ describe("configFrom", () => {
     expect(configFrom({}).minIntervalMs).toBe(DEFAULT_AUTO_CONFIG.minIntervalMs);
   });
 });
+
+describe("opruimen", () => {
+  it("gooit elke ronde de recepten weg waar niets bruikbaars in staat", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+
+    // Alles opgezocht, niets gematcht: hier komt nooit meer een echt cijfer uit.
+    await store.putRecipe({
+      id: "R-DOOD",
+      title: "Doodlopend recept",
+      url: "https://www.ah.nl/allerhande/recept/R-DOOD",
+      servings: 2,
+      imageUrl: null,
+      ingredients: [{ name: "onvindbaar", quantity: 100, unit: "g" }],
+    });
+    await store.putNutrition("R-DOOD", { kcal: 400 }, 1, "ah");
+    await store.putMatch("onvindbaar", null, 0);
+
+    const result = await runAutoIngest(env, { ...fastConfig, purgeGraceMs: 0 });
+
+    expect(result.purged).toBe(1);
+    expect(await store.getRecipe("R-DOOD")).toBeNull();
+  });
+
+  it("laat een vers binnengehaald recept met rust tot de respijtperiode om is", async () => {
+    stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    await store.putRecipe({
+      id: "R-NIEUW",
+      title: "Net binnen",
+      url: "https://www.ah.nl/allerhande/recept/R-NIEUW",
+      servings: 2,
+      imageUrl: null,
+      ingredients: [{ name: "onvindbaar", quantity: 100, unit: "g" }],
+    });
+    await store.putMatch("onvindbaar", null, 0);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    expect(result.purged).toBe(0);
+    expect(await store.getRecipe("R-NIEUW")).not.toBeNull();
+  });
+});

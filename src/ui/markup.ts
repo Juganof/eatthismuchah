@@ -188,6 +188,7 @@ export function adminCard(): string {
         <button class="secondary small" id="ingest">Alles door elkaar ophalen</button>
         <button class="secondary small" id="repair">Ontbrekende ingredi&euml;nten ophalen</button>
         <button class="secondary small" id="enrich">Ingredi&euml;nt-koppelingen aanvullen</button>
+        <button class="secondary small" id="purge">Onbruikbare recepten opruimen</button>
         <button class="secondary small" id="reparse">Archief opnieuw parsen</button>
         <button class="secondary small" id="probe">AH-verbinding testen</button>
       </div>

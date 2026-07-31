@@ -4,7 +4,7 @@ import type { SlotCandidate, Store } from "../db/queries";
 import { calibrateToTotal, coverageOf, resolveRecipe } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
-import { buildTargets, planRecipe, planUniform, targetCost, type Plan, type PlanOptions } from "./plan";
+import { buildTargets, planRecipe, targetCost, type Plan, type PlanOptions } from "./plan";
 
 /**
  * Stelt een hele dag samen: per eetmoment het recept dat, na herschalen, het
@@ -98,18 +98,19 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
 }
 
 /**
- * Kiest hoe dit recept herschaald wordt.
+ * Maakt het plan voor dit recept, of niets.
  *
- * Kennen we de voedingswaarde per ingredient goed genoeg, dan mag de solver zijn
- * werk doen: die kan de kip omhoog en de rijst omlaag draaien. Kennen we alleen
- * het totaal — wat het geval is bij alles wat we van AH's eigen receptpagina
- * overnamen — dan schalen we het gerecht als geheel. Dat is minder fijnmazig maar
- * wel eerlijk, en oneindig veel beter dan rekenen met halve nullen.
+ * Er wordt alleen gerekend met echte voedingswaarde per ingredient. Kennen we
+ * die voor minder dan de helft van het gewicht, dan komt dit recept niet in een
+ * dagmenu — liever geen voorstel dan een voorstel dat op een geschat totaal
+ * drijft. (Er was hier ook een modus die het hele gerecht met één factor
+ * schaalde als alleen AH's portietotaal bekend was; die is eruit, want dat waren
+ * geen cijfers per ingredient maar een gok met een net gezicht.)
  *
  * Is het recepttotaal van AH zelf afkomstig, dan wordt de per-ingredient
  * voedingswaarde eerst geijkt op dat totaal (`calibrateToTotal`): de verhouding
- * tussen ingredienten komt uit echte productdata, maar de som moet kloppen met
- * het cijfer waarvan we zeker weten dat het klopt.
+ * tussen ingredienten komt uit echte productdata, en de som moet kloppen met het
+ * cijfer waarvan we zeker weten dat het klopt.
  *
  * `extraBounds` klemt elk ingredient dicht bij zijn oorspronkelijke hoeveelheid —
  * gebruikt voor een "zoals het recept"-optie die niet toevallig dicht bij 1 mag
@@ -121,18 +122,13 @@ function planFor(
   macroTargets: ReturnType<typeof buildTargets>,
   extraBounds?: Pick<PlanOptions, "minScale" | "maxScale">,
 ): Plan | null {
-  const coverage = coverageOf(resolved);
-  if (coverage >= 0.5) {
-    const source =
-      candidate.source === "ah" && candidate.nutrition.kcal
-        ? calibrateToTotal(resolved, candidate.nutrition)
-        : resolved;
-    return planRecipe(source, macroTargets, { portions: 1, ...extraBounds });
-  }
+  if (coverageOf(resolved) < 0.5) return null;
 
-  const known = candidate.nutrition;
-  if (!known?.kcal) return null;
-  return planUniform(resolved, known, macroTargets, { portions: 1, ...extraBounds });
+  const source =
+    candidate.source === "ah" && candidate.nutrition.kcal
+      ? calibrateToTotal(resolved, candidate.nutrition)
+      : resolved;
+  return planRecipe(source, macroTargets, { portions: 1, ...extraBounds });
 }
 
 export interface PlanOption {

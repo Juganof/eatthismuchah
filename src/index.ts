@@ -84,6 +84,7 @@ app.get("/api/stats", async (c) => {
     recipes: await store.countRecipes(),
     plannable: await store.countPlannable(),
     zonderIngredienten: await store.countWithoutIngredients(),
+    onbruikbaar: await store.countUnusableRecipes(configFrom(c.env).purgeGraceMs),
     scrapes: raw.total,
     unparsed: raw.unparsed,
   });
@@ -225,6 +226,21 @@ app.post("/api/enrich", async (c) => {
     remaining: await store.countIngredientNamesWithoutMatch(),
     errors: result.errors.slice(0, 10),
   });
+});
+
+/**
+ * Meteen opruimen in plaats van wachten op de volgende automatische ronde. Weg
+ * gaat alles waar de planner niets mee kan: geen ingredienten, geen
+ * voedingswaarde, of geen enkel ingredient met echte productcijfers erachter.
+ */
+app.post("/api/purge", async (c) => {
+  const body = await c.req.json<{ graceMs?: number }>().catch(() => ({}) as { graceMs?: number });
+  const store = storeFor(c.env);
+  const config = configFrom(c.env);
+  // graceMs 0 mag: dat is "ruim nu alles op wat nu onbruikbaar is".
+  const graceMs = Number.isFinite(body.graceMs) ? Number(body.graceMs) : config.purgeGraceMs;
+  const purged = await store.purgeUnusableRecipes(graceMs, config.purgeBatch);
+  return c.json({ purged, remaining: await store.countUnusableRecipes(graceMs) });
 });
 
 /**

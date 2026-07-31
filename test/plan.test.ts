@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTargets, planRecipe, planUniform, rankPlans, targetCost } from "../src/optimize/plan";
+import { buildTargets, planRecipe, rankPlans, targetCost } from "../src/optimize/plan";
 import type { ResolvedRecipe } from "../src/ah/types";
 
 /** A 4-serving recipe: 500 g chicken, 300 g rice, 20 g oil, plus salt. */
@@ -134,14 +134,6 @@ describe("planRecipe", () => {
     expect(chicken.gramsSource).toBe("explicit");
     expect(chicken.unit).toBe("g");
     expect(chicken.originalQuantity).toBeCloseTo(125); // 500 g / 4 servings
-  });
-
-  it("flags a solver plan with scalingMode, distinct from a uniform one", () => {
-    const plan = planRecipe(matched, buildTargets({ protein: 60 }), { portions: 1 });
-    expect(plan.scalingMode).toBe("solver");
-
-    const uniform = planUniform(matched, recipe.total, buildTargets({ protein: 60 }), { portions: 1 });
-    expect(uniform.scalingMode).toBe("uniform");
   });
 
   it("keeps a non-gram quantity in its own unit, not converted to grams", () => {

@@ -15,9 +15,10 @@ Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon geb
 2. **Omrekenen** — `src/nutrition/units.ts` zet "2 el olijfolie" om naar grammen via
    dichtheid- en stukgewicht-tabellen; alles verderop rekent in grammen, want
    AH-voedingswaarden zijn per 100 g.
-3. **Matchen** — `src/nutrition/match.ts` koppelt een receptregel aan een AH-product
-   en geeft een betrouwbaarheidsscore. Onder 0,4 melden we "geen match" in plaats van
-   te gokken.
+3. **Matchen** — hangt AH zelf een webshopproduct aan de receptregel (de "bestel de
+   ingrediënten"-koppeling), dan is dát het product: geen zoekopdracht, geen gok. Pas
+   als die koppeling ontbreekt, zoekt `src/nutrition/match.ts` er zelf een bij met een
+   betrouwbaarheidsscore. Onder 0,4 melden we "geen match" in plaats van te gokken.
 4. **Doelen bepalen** — `src/nutrition/targets.ts` rekent het profiel om naar een
    dagdoel (Mifflin-St Jeor → TDEE → tekort of overschot), `src/nutrition/split.ts`
    verdeelt dat over de eetmomenten.
@@ -34,11 +35,13 @@ tientallen kandidaten maal tien ingredienten maal de verplichte pauze ertussen l
 genereren van een dag in de minuten. Plannen draait nu in `cacheOnly`-modus en is puur
 een databaseoperatie — een dag staat er in een fractie van een seconde.
 
-Daardoor is er wel een tweede manier van herschalen nodig. AH levert de voedingswaarde
-per portie maar niet per ingredient, en de solver verdeelt juist over ingredienten.
-Kennen we alleen het totaal, dan schaalt `planUniform` het gerecht als geheel met één
-factor: minder fijnmazig, maar eerlijk, en oneindig veel beter dan rekenen met een
-optelsom van half gematchte producten.
+**Alleen echte cijfers per ingrediënt.** Is voor minder dan de helft van het
+receptgewicht bekend wat het aan macro's levert, dan komt dat recept niet in een
+dagmenu — liever geen voorstel dan een voorstel dat op een schatting drijft. Er was
+hier ook een modus die het hele gerecht met één factor schaalde (×1,7 op alles) als
+alleen AH's portietotaal bekend was; die is eruit. Wél blijft AH's eigen portietotaal
+gebruikt om de som van de productcijfers op te ijken: de verhouding tussen
+ingrediënten komt uit echte productdata, de schaal uit het cijfer van AH.
 
 Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
 en ingrediënten kun je vastzetten met `locked`.
@@ -52,11 +55,27 @@ ingredienten alleen:
   `tussendoortje`, `hoofdgerecht`). Die zijn gezaghebbend voor het eetmoment: raden op
   de titel gaat mis, want een "Sandwich met kip" is volgens AH een tussendoortje.
   Alleen als AH niets over de menugang zegt, valt de app terug op de titelheuristiek.
-* **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Als die er is,
-  wordt hij overgenomen en hoeft er geen enkel ingredient aan een product gekoppeld te
-  worden. Dat scheelt tientallen zoekopdrachten per recept en is bovendien
-  nauwkeuriger, dus een eigen berekening overschrijft AH's cijfers nooit
-  (`recipe_nutrition.source`).
+* **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Die wordt
+  overgenomen zonder één productzoekopdracht, en een eigen berekening overschrijft hem
+  nooit (`recipe_nutrition.source`). Genoeg om te plannen is het niet: daarvoor moeten
+  de ingrediënten alsnog aan producten gekoppeld zijn.
+* **De productlinks per ingrediënt** — AH's eigen "bestel de ingrediënten"-koppeling,
+  die in de paginastate staat (bij de huidige App Router in de `self.__next_f`-chunks,
+  zie `extractFlightJson`). Staat die erin, dan wordt de voedingswaarde rechtstreeks
+  van dat product gehaald: één aanroep in plaats van zoeken plus scoren, en zonder
+  kans op het verkeerde product.
+
+## Alleen schone data
+
+Recepten waar de planner niets mee kan worden automatisch opgeruimd — elke ronde van
+de automaat, en met de knop "Onbruikbare recepten opruimen" ook meteen. Weg gaat een
+recept dat geen ingrediënten heeft, geen doorgerekende voedingswaarde, of geen enkel
+ingrediënt met echte productcijfers erachter. Twee waarborgen: er moet een
+respijtperiode voorbij zijn (standaard 24 uur, `AUTO_PURGE_GRACE_MS`) en elk
+ingrediënt moet al opgezocht zijn — anders gooi je weg wat nog in de pijplijn zit.
+Favorieten en recepten uit een opgeslagen dag blijven altijd staan, en het
+scrape-archief wordt nooit aangeraakt: een weggegooid recept is terug te halen zonder
+ah.nl opnieuw te bevragen.
 
 Scrapen per eetmoment gaat via `POST /api/ingest` met `{"moment":"ontbijt"}`. Er wordt
 breed gezocht en alles wordt bewaard, maar alleen wat AH zélf als dat moment labelt
@@ -188,6 +207,7 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `POST /api/ingest` | Recepten scrapen en de cache vullen |
 | `POST /api/reparse` | Recepten terughalen uit het ruwe archief |
 | `POST /api/repair` | Lege recepten alsnog ophalen (na een geblokkeerde scrape) |
+| `POST /api/purge` | Onbruikbare recepten opruimen (`graceMs` optioneel) |
 | `GET /api/auto/status` | Stand van het automatisch bijvullen |
 | `POST /api/auto/run` | Nu een ronde draaien in plaats van wachten op de cron |
 | `GET /api/browse/recipes` | Alle recepten met labels, voeding en dekking |

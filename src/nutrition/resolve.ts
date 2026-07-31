@@ -81,6 +81,27 @@ export async function lookupIngredientMatch(
 }
 
 /**
+ * Haalt het product op waar AH de receptregel zelf aan koppelt. Geen zoekopdracht,
+ * geen scorefunctie: één detailaanroep (of nul, als we het product al kennen).
+ * Score 1, want er valt hier niets te raden.
+ */
+export async function lookupLinkedProduct(
+  name: string,
+  productId: string,
+  client: AhClient,
+  store: Store,
+): Promise<Product | null> {
+  let product = await store.getProduct(productId);
+  if (!product) {
+    product = await client.getProduct(productId);
+    if (product) await store.putProduct(product);
+  }
+  if (!product) return null;
+  await store.putMatch(name, product.webshopId, 1);
+  return product;
+}
+
+/**
  * Finds the AH product for one ingredient line, consulting the cache first. Failed
  * lookups are cached too — an ingredient that has no sensible product ("water",
  * "peper naar smaak") should not trigger a search on every single request.
@@ -91,6 +112,26 @@ async function resolveProduct(
   store: Store,
   cacheOnly = false,
 ): Promise<{ product: Product | null; score: number }> {
+  // AH's eigen koppeling wint van alles wat in de cache staat: die kan uit een
+  // eerdere zoekronde komen en dus een gok zijn.
+  if (ingredient.productId) {
+    const linked = await store.getProduct(ingredient.productId);
+    if (linked) return { product: linked, score: 1 };
+    if (!cacheOnly) {
+      try {
+        const product = await lookupLinkedProduct(
+          ingredient.name,
+          ingredient.productId,
+          client,
+          store,
+        );
+        if (product) return { product, score: 1 };
+      } catch {
+        // netwerkfout: hieronder gewoon verder met de gewone weg
+      }
+    }
+  }
+
   const cached = await store.getMatch(ingredient.name);
   if (cached !== undefined) {
     if (cached.webshopId === null) return { product: null, score: 0 };

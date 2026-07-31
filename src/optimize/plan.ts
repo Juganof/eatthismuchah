@@ -55,12 +55,6 @@ export interface Plan {
   cost: number;
   /** Share of recipe weight with known nutrition. */
   coverage: number;
-  /**
-   * Whether this plan came from the per-ingredient solver (real per-ingredient
-   * nutrition was known) or from scaling the whole recipe by one factor (only the
-   * recipe-level total was known, e.g. AH's own nutrition-per-serving figure).
-   */
-  scalingMode: "solver" | "uniform";
 }
 
 /**
@@ -141,113 +135,7 @@ export function planRecipe(
     perPortion,
     cost: result.cost,
     coverage: coverageOfPlan(ingredients),
-    scalingMode: "solver",
   };
-}
-
-/**
- * Herschaalt een recept als geheel, met één factor voor alles.
- *
- * Nodig omdat AH de voedingswaarde per portie meelevert maar niet per
- * ingredient. De solver kan dan niets: die verdeelt juist over ingredienten.
- * Alles met dezelfde factor schalen is wél eerlijk — je maakt gewoon een grotere
- * of kleinere pan — en gebruikt het cijfer waarvan we zeker weten dat het klopt,
- * in plaats van een optelsom van half gematchte producten.
- */
-export function planUniform(
-  resolved: ResolvedRecipe,
-  totalForRecipe: Nutrients,
-  targets: MacroTarget[],
-  opts: PlanOptions = {},
-): Plan {
-  const portions = opts.portions ?? 1;
-  const servings = resolved.recipe.servings > 0 ? resolved.recipe.servings : 1;
-
-  const perPortionBase: Nutrients = {};
-  for (const [key, value] of Object.entries(totalForRecipe)) {
-    perPortionBase[key as keyof Nutrients] = value / servings;
-  }
-
-  const scale = bestUniformScale(perPortionBase, targets, {
-    min: opts.minScale ?? 0.4,
-    max: opts.maxScale ?? 2.5,
-  });
-
-  const perPortion: Nutrients = {};
-  for (const [key, value] of Object.entries(perPortionBase)) {
-    perPortion[key as keyof Nutrients] = value * scale;
-  }
-
-  const ingredients: PlannedIngredient[] = resolved.ingredients.map((ing) => {
-    const originalGrams = (ing.grams / servings) * portions;
-    return {
-      name: ing.raw.name,
-      originalGrams: round(originalGrams),
-      grams: round(originalGrams * scale),
-      scale: Math.round(scale * 100) / 100,
-      // De verdeling over de ingredienten kennen we niet; alleen het totaal.
-      nutrients: {},
-      productTitle: ing.product?.title ?? null,
-      matchScore: ing.matchScore,
-      unmatched: !ing.product || Object.keys(ing.product.per100g).length === 0,
-      originalQuantity: ing.raw.quantity !== null ? round((ing.raw.quantity / servings) * portions) : null,
-      unit: ing.raw.unit,
-      gramsSource: ing.gramsSource,
-    };
-  });
-
-  const totals: Nutrients = {};
-  for (const [key, value] of Object.entries(perPortion)) {
-    totals[key as keyof Nutrients] = value * portions;
-  }
-
-  return {
-    recipeId: resolved.recipe.id,
-    title: resolved.recipe.title,
-    url: resolved.recipe.url,
-    imageUrl: resolved.recipe.imageUrl,
-    portions,
-    ingredients,
-    totals,
-    perPortion,
-    cost: targetCost(perPortion, targets),
-    // De totalen komen van AH zelf, dus hier valt niets te schatten.
-    coverage: 1,
-    scalingMode: "uniform",
-  };
-}
-
-/**
- * De factor die de doelen het dichtst benadert. Voor de gewone doelen is dat een
- * kleinsteklassenoplossing in één onbekende; daarna worden de maxima en minima
- * erop losgelaten, want die zijn harde grenzen en geen wensen.
- */
-function bestUniformScale(
-  perPortion: Nutrients,
-  targets: MacroTarget[],
-  bounds: { min: number; max: number },
-): number {
-  let numerator = 0;
-  let denominator = 0;
-  for (const target of targets) {
-    if (target.mode !== "target") continue;
-    const value = perPortion[target.key] ?? 0;
-    if (value <= 0) continue;
-    const weight = target.weight ?? 1;
-    numerator += weight * value * target.value;
-    denominator += weight * value * value;
-  }
-
-  let scale = denominator > 0 ? numerator / denominator : 1;
-
-  for (const target of targets) {
-    const value = perPortion[target.key] ?? 0;
-    if (value <= 0) continue;
-    if (target.mode === "max") scale = Math.min(scale, target.value / value);
-    if (target.mode === "min") scale = Math.max(scale, target.value / value);
-  }
-
-  return Math.min(bounds.max, Math.max(bounds.min, scale));
 }
 
 /**

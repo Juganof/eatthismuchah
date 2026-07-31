@@ -354,8 +354,8 @@ describe("ingredientNamesWithoutMatch", () => {
     await store.putRecipe(recipe({ id: "R-R3", ingredients: [{ name: "banaan", quantity: 1, unit: null }] }));
 
     const names = await store.ingredientNamesWithoutMatch(10);
-    expect(names[0]).toEqual({ name: "kwark", uses: 2 });
-    expect(names[1]).toEqual({ name: "banaan", uses: 1 });
+    expect(names[0]).toEqual({ name: "kwark", uses: 2, productId: null });
+    expect(names[1]).toEqual({ name: "banaan", uses: 1, productId: null });
     expect(await store.countIngredientNamesWithoutMatch()).toBe(2);
   });
 
@@ -381,6 +381,70 @@ describe("ingredientNamesWithoutMatch", () => {
       .bind(longAgo, "kwark")
       .run();
 
-    expect(await store.ingredientNamesWithoutMatch(10)).toEqual([{ name: "kwark", uses: 1 }]);
+    expect(await store.ingredientNamesWithoutMatch(10)).toEqual([{ name: "kwark", uses: 1, productId: null }]);
+  });
+});
+
+describe("purgeUnusableRecipes", () => {
+  /** Een recept waar de planner niets aan heeft: alles is al opgezocht, niets matchte. */
+  async function seedDeadEnd(store: Store, id: string): Promise<void> {
+    await store.putRecipe(recipe({ id, ingredients: [{ name: "onbekend", quantity: 100, unit: "g" }] }));
+    await store.putNutrition(id, { kcal: 400 }, 1, "ah");
+    await store.putMatch("onbekend", null, 0);
+  }
+
+  it("gooit een recept weg waarvan geen enkel ingredient echte voedingswaarde heeft", async () => {
+    const store = freshStore();
+    await seedDeadEnd(store, "R-R1");
+
+    expect(await store.countUnusableRecipes(0)).toBe(1);
+    expect(await store.purgeUnusableRecipes(0)).toBe(1);
+    expect(await store.getRecipe("R-R1")).toBeNull();
+    expect(await store.countRecipes()).toBe(0);
+  });
+
+  it("gooit een recept zonder ingredienten en een recept zonder voedingswaarde weg", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ id: "R-R1", ingredients: [] }));
+    await store.putRecipe(recipe({ id: "R-R2" }));
+    await store.putMatch("kipfilet", null, 0);
+
+    expect(await store.purgeUnusableRecipes(0)).toBe(2);
+    expect(await store.countRecipes()).toBe(0);
+  });
+
+  it("laat een recept met echte productcijfers staan", async () => {
+    const store = freshStore();
+    await seedRecipes(store, [
+      { id: "R-R1", title: "Kwark", ingredients: [{ name: "kwark", grams: 200, per100g: FOODS.kwark! }] },
+    ]);
+
+    expect(await store.countUnusableRecipes(0)).toBe(0);
+    expect(await store.purgeUnusableRecipes(0)).toBe(0);
+  });
+
+  it("laat een recept staan zolang er nog ingredienten open staan om op te zoeken", async () => {
+    const store = freshStore();
+    // Niets opgezocht: dit is geen doodlopend recept maar werk dat nog moet gebeuren.
+    await store.putRecipe(recipe({ id: "R-R1" }));
+    await store.putNutrition("R-R1", { kcal: 400 }, 1, "ah");
+
+    expect(await store.countUnusableRecipes(0)).toBe(0);
+  });
+
+  it("respecteert de respijtperiode voor net binnengehaalde recepten", async () => {
+    const store = freshStore();
+    await seedDeadEnd(store, "R-R1");
+
+    expect(await store.countUnusableRecipes(60 * 60 * 1000)).toBe(0);
+    expect(await store.purgeUnusableRecipes(60 * 60 * 1000)).toBe(0);
+  });
+
+  it("raakt een favoriet of een recept uit een opgeslagen dag niet aan", async () => {
+    const store = freshStore();
+    await seedDeadEnd(store, "R-R1");
+    await store.setPref("R-R1", "fav");
+
+    expect(await store.purgeUnusableRecipes(0)).toBe(0);
   });
 });

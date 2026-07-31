@@ -114,7 +114,7 @@ describe("enrichIngredientMatches", () => {
     expect(await store.getMatch("kwark")).toBeUndefined();
   });
 
-  it("unlocks the per-ingredient solver once matches exist, instead of scaling everything by one factor", async () => {
+  it("maakt een recept pas plambaar zodra de koppelingen er zijn", async () => {
     stubAhProducts();
     const env = envFor();
     const store = new Store(env.DB);
@@ -141,15 +141,17 @@ describe("enrichIngredientMatches", () => {
     // dit doel kan alleen gehaald worden door ze verschillend bij te sturen.
     const targets = { kcal: 200, protein: 35, carbs: 15, fat: 1, fiber: 2 };
 
+    // Zonder koppelingen kennen we alleen AH's portietotaal, en daarmee wordt
+    // niet gepland: geen voorstel is eerlijker dan een geschat voorstel.
     const before = await rerollSlot(store, new AhClient("test"), { targets, excludeRecipeIds: [] });
-    expect(before?.scalingMode).toBe("uniform");
+    expect(before).toBeNull();
 
     const enriched = await enrichIngredientMatches(env, 10, { minIntervalMs: 0, backoffMs: 0 });
     expect(enriched.matched).toBe(2);
 
     const after = await rerollSlot(store, new AhClient("test"), { targets, excludeRecipeIds: [] });
 
-    expect(after?.scalingMode).toBe("solver");
+    expect(after).not.toBeNull();
     // Kwark en banaan hebben nu een eigen voedingswaarde, dus de solver kan ze
     // los bijsturen in plaats van allebei met dezelfde factor te schalen.
     const scales = new Set(after!.ingredients.map((i) => i.scale));
