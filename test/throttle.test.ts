@@ -80,4 +80,19 @@ describe("pacing", () => {
     // Twee verzoeken, dus minstens één wachttijd ertussen.
     expect(Date.now() - started).toBeGreaterThanOrEqual(100);
   });
+
+  it("also paces across separate client instances, not just within one", async () => {
+    // Elke knop in de UI en elke cron-tick bouwt zijn eigen AhClient. Zonder een
+    // gedeelde klok begint de pacing van elke instance weer bij nul, en spreken
+    // twee kort na elkaar ingedrukte knoppen elk hun eigen tempo — samen toch
+    // een burst richting ah.nl, ook al hield elke aanroep zich keurig aan zijn
+    // eigen interval.
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(ok));
+
+    const started = Date.now();
+    await new AhClient("test", undefined, { minIntervalMs: 120 }).getRecipe("R-R1");
+    await new AhClient("test", undefined, { minIntervalMs: 120 }).getRecipe("R-R2");
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+  });
 });
