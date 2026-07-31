@@ -4,7 +4,9 @@
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types"],
+    // "node" staat erbij voor de tests: die draaien in Node en gebruiken
+    // node:sqlite als D1-vervanger. De worker zelf raakt die types niet aan.
+    "types": ["@cloudflare/workers-types", "node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,

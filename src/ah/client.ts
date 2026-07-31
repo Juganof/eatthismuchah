@@ -7,6 +7,18 @@ const PRODUCT_DETAIL_URL = "https://api.ah.nl/mobile-services/product/detail/v4/
 const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
 const RECIPE_BASE = "https://www.ah.nl/allerhande";
 
+/** Wat er gescraped werd, zodat het archief doorzoekbaar blijft per soort. */
+export type ScrapeKind = "recipe" | "recipe_search" | "product" | "product_search";
+
+export interface RawScrape {
+  kind: ScrapeKind;
+  /** Recept-id, webshop-id of zoekterm. */
+  ref: string;
+  url: string;
+  status: number;
+  body: string;
+}
+
 /**
  * AH exposes no public API, so every endpoint here is the one its own apps use and
  * can change without notice. Each call therefore degrades to HTML scraping rather
@@ -15,7 +27,25 @@ const RECIPE_BASE = "https://www.ah.nl/allerhande";
 export class AhClient {
   private token: string | null = null;
 
-  constructor(private readonly userAgent: string) {}
+  /**
+   * `onRaw` krijgt elke response binnen voordat er geparsed wordt. Daar hangt de
+   * archivering aan: gaat het parsen daarna stuk, dan is de payload toch bewaard.
+   * Fouten uit de callback worden ingeslikt — archiveren mag een scrape nooit
+   * laten mislukken.
+   */
+  constructor(
+    private readonly userAgent: string,
+    private readonly onRaw?: (raw: RawScrape) => void,
+  ) {}
+
+  private record(raw: RawScrape): void {
+    if (!this.onRaw) return;
+    try {
+      this.onRaw(raw);
+    } catch {
+      // archivering is nooit belangrijker dan het antwoord zelf
+    }
+  }
 
   private async authHeaders(): Promise<Record<string, string>> {
     if (!this.token) {
@@ -42,20 +72,24 @@ export class AhClient {
   }
 
   /** Retries once without a cached token, so an expired token self-heals. */
-  private async apiGet(url: string): Promise<unknown> {
+  private async apiGet(url: string, archive?: { kind: ScrapeKind; ref: string }): Promise<unknown> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch(url, { headers: await this.authHeaders() });
       if (res.status === 401 && attempt === 0) {
         this.token = null;
         continue;
       }
+      // Lees als tekst, niet als JSON: ook een onparseerbaar antwoord hoort in
+      // het archief, en dat is juist het geval waarin je het nodig hebt.
+      const text = await res.text();
+      if (archive) this.record({ ...archive, url, status: res.status, body: text });
       if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-      return await res.json();
+      return JSON.parse(text);
     }
     throw new Error(`GET ${url} failed after re-auth`);
   }
 
-  private async htmlGet(url: string): Promise<string> {
+  private async htmlGet(url: string, archive?: { kind: ScrapeKind; ref: string }): Promise<string> {
     const res = await fetch(url, {
       headers: {
         "User-Agent": this.userAgent,
@@ -63,8 +97,10 @@ export class AhClient {
         "Accept-Language": "nl-NL,nl;q=0.9",
       },
     });
+    const text = await res.text();
+    if (archive) this.record({ ...archive, url, status: res.status, body: text });
     if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-    return await res.text();
+    return text;
   }
 
   // ---------------------------------------------------------------- products
@@ -74,7 +110,9 @@ export class AhClient {
     // searches; those cannot supply a meaningful per-100g nutrition record.
     const upstreamSize = size + 10;
     const url = `${PRODUCT_SEARCH_URL}?query=${encodeURIComponent(query)}&size=${upstreamSize}`;
-    const body = (await this.apiGet(url)) as { products?: unknown[] };
+    const body = (await this.apiGet(url, { kind: "product_search", ref: query })) as {
+      products?: unknown[];
+    };
     const products = Array.isArray(body.products) ? body.products : [];
     return products
       .map((p) => toProductStub(p))
@@ -84,7 +122,10 @@ export class AhClient {
 
   /** Full product record including nutrition, which search results omit. */
   async getProduct(webshopId: string): Promise<Product | null> {
-    const body = await this.apiGet(`${PRODUCT_DETAIL_URL}/${encodeURIComponent(webshopId)}`);
+    const body = await this.apiGet(`${PRODUCT_DETAIL_URL}/${encodeURIComponent(webshopId)}`, {
+      kind: "product",
+      ref: webshopId,
+    });
     const card = deepFind(body, (v) => isRecord(v) && "webshopId" in v && "title" in v);
     const stub = toProductStub(card ?? body);
     if (!stub) return null;
@@ -92,7 +133,10 @@ export class AhClient {
     // The v4 mobile detail response stopped including nutrition in 2026. The
     // server-rendered product page still contains a labelled per-100g table.
     if (per100g.kcal === undefined || per100g.protein === undefined) {
-      const html = await this.htmlGet(`${PRODUCT_PAGE_URL}${encodeURIComponent(webshopId)}`);
+      const html = await this.htmlGet(`${PRODUCT_PAGE_URL}${encodeURIComponent(webshopId)}`, {
+        kind: "product",
+        ref: webshopId,
+      });
       per100g = parseNutritionHtml(html);
     }
     return { ...stub, webshopId, per100g };
@@ -107,7 +151,7 @@ export class AhClient {
   async searchRecipes(query: string, size = 20): Promise<Recipe[]> {
     const jsonUrl = `${RECIPE_BASE}/service/search/recipes?searchTerm=${encodeURIComponent(query)}&size=${size}`;
     try {
-      const body = await this.apiGet(jsonUrl);
+      const body = await this.apiGet(jsonUrl, { kind: "recipe_search", ref: query });
       const found = collectRecipes(body);
       if (found.length > 0) return found.slice(0, size);
     } catch {
@@ -115,6 +159,7 @@ export class AhClient {
     }
     const html = await this.htmlGet(
       `${RECIPE_BASE}/recepten-zoeken?query=${encodeURIComponent(query)}`,
+      { kind: "recipe_search", ref: query },
     );
     const embedded = collectRecipes(extractEmbeddedJson(html));
     return (embedded.length > 0 ? embedded : parseRecipeCards(html)).slice(0, size);
@@ -122,7 +167,10 @@ export class AhClient {
 
   /** Recipe detail. Ingredient lists only ever appear in the embedded page state. */
   async getRecipe(id: string): Promise<Recipe | null> {
-    const html = await this.htmlGet(`${RECIPE_BASE}/recept/${encodeURIComponent(id)}`);
+    const html = await this.htmlGet(`${RECIPE_BASE}/recept/${encodeURIComponent(id)}`, {
+      kind: "recipe",
+      ref: id,
+    });
     const found = collectRecipes(extractEmbeddedJson(html));
     // The detail page embeds the current recipe plus "related recipe" cards that have
     // no ingredients; the real one is whichever carries an ingredient list.

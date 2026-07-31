@@ -1,8 +1,14 @@
 import { Hono } from "hono";
-import { AhClient } from "./ah/client";
-import { Store } from "./db/queries";
+import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
+import { extractEmbeddedJson } from "./ah/scrape";
+import type { Recipe } from "./ah/types";
+import { Store, type SavedDayMeal } from "./db/queries";
 import { coverageOf, resolveRecipe } from "./nutrition/resolve";
+import { splitTargets, type MealSlot } from "./nutrition/split";
+import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
+import { generateDay, rerollSlot, type DayPlan } from "./optimize/day";
 import { buildTargets, planRecipe, rankPlans, type Plan } from "./optimize/plan";
+import { buildShoppingList, type ShoppingInput } from "./plan/shopping";
 import { renderPage } from "./ui/page";
 
 export interface Env {
@@ -14,24 +20,63 @@ export interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-const clientFor = (env: Env) => new AhClient(env.AH_USER_AGENT);
+/**
+ * Elke client archiveert zijn scrapes. Dat gebeurt buiten de request-afhandeling
+ * om (`waitUntil` waar beschikbaar), zodat het antwoord er niet op hoeft te wachten
+ * maar de payload wel bewaard blijft.
+ */
+/** Alleen `waitUntil` is nodig, en Hono's context type wijkt af van workers-types. */
+type Waiter = { waitUntil(promise: Promise<unknown>): void } | undefined;
+
+function clientFor(env: Env, ctx?: Waiter): AhClient {
+  const store = new Store(env.DB);
+  return new AhClient(env.AH_USER_AGENT, (raw: RawScrape) => {
+    const write = store.putRaw(raw);
+    if (ctx?.waitUntil) ctx.waitUntil(write);
+  });
+}
+
+const storeFor = (env: Env) => new Store(env.DB);
 
 app.get("/", (c) => c.html(renderPage()));
 
 /** Reports which ah.nl endpoints still work. First stop when results go empty. */
-app.get("/api/probe", async (c) => c.json(await clientFor(c.env).probe()));
+app.get("/api/probe", async (c) => c.json(await clientFor(c.env, c.executionCtx).probe()));
 
 app.get("/api/stats", async (c) => {
-  const store = new Store(c.env.DB);
-  return c.json({ recipes: await store.countRecipes() });
+  const store = storeFor(c.env);
+  const raw = await store.countRaw();
+  return c.json({
+    recipes: await store.countRecipes(),
+    plannable: await store.countPlannable(),
+    scrapes: raw.total,
+    unparsed: raw.unparsed,
+  });
 });
 
-/** Live Allerhande search. Results are titles only; nutrition needs /api/ingest. */
+/**
+ * Live Allerhande search. Anders dan vroeger bewaart dit alles wat het tegenkomt:
+ * de ruwe payload gaat het archief in en elk gevonden recept wordt op de
+ * achtergrond volledig opgehaald en doorgerekend, zodat het meteen bruikbaar is
+ * voor de dagplanner in plaats van pas na een aparte ingest.
+ */
 app.get("/api/search", async (c) => {
   const q = c.req.query("q");
   if (!q) return c.json({ error: "missing ?q" }, 400);
-  const recipes = await clientFor(c.env).searchRecipes(q, Number(c.req.query("size") ?? 20));
-  return c.json({ recipes: recipes.map(({ id, title, url, imageUrl }) => ({ id, title, url, imageUrl })) });
+
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
+  const recipes = await client.searchRecipes(q, Number(c.req.query("size") ?? 20));
+
+  for (const stub of recipes) await store.putRecipe(stub);
+  // Het doorrekenen doet een productzoekopdracht per nieuw ingredient, dus dat
+  // mag de zoekopdracht niet ophouden.
+  c.executionCtx?.waitUntil(hydrate(c.env, recipes.map((r) => r.id)));
+
+  return c.json({
+    recipes: recipes.map(({ id, title, url, imageUrl }) => ({ id, title, url, imageUrl })),
+    saved: recipes.length,
+  });
 });
 
 /**
@@ -48,10 +93,46 @@ app.post("/api/ingest", async (c) => {
   return c.json(await ingest(c.env, queries, limit));
 });
 
+/**
+ * Bouwt recepten opnieuw op uit het ruwe archief, met de parser van nu. Dit is
+ * waarvoor scrape_raw bestaat: gaat AH zijn pagina's om en repareren we de parser,
+ * dan hoeft er geen enkele scrape opnieuw.
+ */
+app.post("/api/reparse", async (c) => {
+  const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
+  const store = storeFor(c.env);
+  const rows = await store.latestRawPerRef("recipe", body.limit ?? 200);
+
+  let recovered = 0;
+  const failed: string[] = [];
+  for (const row of rows) {
+    try {
+      const found = collectRecipes(extractEmbeddedJson(row.body));
+      const recipe = found.find((r) => r.ingredients.length > 0);
+      if (!recipe) {
+        await store.markRawParsed(row.id, false, "geen recept met ingredienten gevonden");
+        failed.push(row.ref);
+        continue;
+      }
+      await store.putRecipe(recipe);
+      await store.markRawParsed(row.id, true, null);
+      recovered++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await store.markRawParsed(row.id, false, message);
+      failed.push(row.ref);
+    }
+  }
+
+  // Voedingswaarde bijwerken gebeurt op de achtergrond: dat doet netwerk.
+  c.executionCtx?.waitUntil(hydrate(c.env, rows.map((r) => r.ref)));
+  return c.json({ examined: rows.length, recovered, failed: failed.slice(0, 20) });
+});
+
 /** Nutrition and ingredient breakdown for one recipe, without any rescaling. */
 app.get("/api/recipe/:id", async (c) => {
-  const store = new Store(c.env.DB);
-  const client = clientFor(c.env);
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
   const id = c.req.param("id");
 
   let recipe = await store.getRecipe(id);
@@ -62,6 +143,10 @@ app.get("/api/recipe/:id", async (c) => {
   }
 
   const resolved = await resolveRecipe(recipe, client, store);
+  // Ook hier de voedingswaarde bewaren: zonder deze rij blijft het recept
+  // onzichtbaar voor de dagplanner, hoe vaak je hem ook opent.
+  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+
   return c.json({
     recipe: resolved.recipe,
     total: resolved.total,
@@ -84,8 +169,8 @@ app.post("/api/plan", async (c) => {
   const body = await c.req.json<PlanRequest & { recipeId: string }>();
   if (!body.recipeId) return c.json({ error: "recipeId is required" }, 400);
 
-  const store = new Store(c.env.DB);
-  const client = clientFor(c.env);
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
 
   let recipe = await store.getRecipe(body.recipeId);
   if (!recipe) {
@@ -95,6 +180,8 @@ app.post("/api/plan", async (c) => {
   }
 
   const resolved = await resolveRecipe(recipe, client, store);
+  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+
   const plan = planRecipe(resolved, buildTargets(body), {
     portions: body.portions ?? 1,
     locked: body.locked,
@@ -110,8 +197,8 @@ app.post("/api/plan", async (c) => {
  */
 app.post("/api/generate", async (c) => {
   const body = await c.req.json<PlanRequest & { candidates?: number; results?: number }>();
-  const store = new Store(c.env.DB);
-  const client = clientFor(c.env);
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
 
   const shortlist = await store.shortlist(body.candidates ?? 25);
   if (shortlist.length === 0) {
@@ -147,13 +234,260 @@ app.post("/api/match", async (c) => {
   if (!body.ingredient || !body.webshopId) {
     return c.json({ error: "ingredient and webshopId are required" }, 400);
   }
-  const store = new Store(c.env.DB);
-  const product = await clientFor(c.env).getProduct(body.webshopId);
+  const store = storeFor(c.env);
+  const product = await clientFor(c.env, c.executionCtx).getProduct(body.webshopId);
   if (!product) return c.json({ error: "product not found" }, 404);
   await store.putProduct(product);
   await store.overrideMatch(body.ingredient.toLowerCase(), product.webshopId);
   return c.json({ ok: true, product });
 });
+
+// ------------------------------------------------------------------- profiel
+
+app.get("/api/profile", async (c) => {
+  const profile = await storeFor(c.env).getProfile();
+  return c.json(withDerived(profile));
+});
+
+app.put("/api/profile", async (c) => {
+  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+  const profile = sanitiseProfile(body);
+  await storeFor(c.env).putProfile(profile);
+  return c.json(withDerived(profile));
+});
+
+/** Profiel plus wat eruit volgt, zodat de UI niets hoeft na te rekenen. */
+function withDerived(profile: ReturnType<typeof sanitiseProfile>) {
+  const targets = dailyTargets(profile);
+  return {
+    profile,
+    bmr: bmr(profile) === null ? null : Math.round(bmr(profile)!),
+    tdee: tdee(profile) === null ? null : Math.round(tdee(profile)!),
+    targets,
+    // Zonder gewicht, lengte, leeftijd en geslacht valt er niets te berekenen.
+    complete: targets !== null,
+  };
+}
+
+// --------------------------------------------------------------- eetmomenten
+
+app.get("/api/slots", async (c) => {
+  const store = storeFor(c.env);
+  const slots = await store.getSlots();
+  const targets = dailyTargets(await store.getProfile());
+  return c.json({ slots, split: targets ? splitTargets(targets, slots) : [] });
+});
+
+app.put("/api/slots", async (c) => {
+  const body = await c.req.json<{ slots?: unknown[] }>().catch(() => ({ slots: [] }));
+  const slots = sanitiseSlots(body.slots ?? []);
+  if (slots.length === 0) return c.json({ error: "minstens één eetmoment is nodig" }, 400);
+
+  const store = storeFor(c.env);
+  await store.putSlots(slots);
+  const targets = dailyTargets(await store.getProfile());
+  return c.json({ slots, split: targets ? splitTargets(targets, slots) : [] });
+});
+
+/** Maakt van wat de UI stuurt iets waar de verdeling mee kan rekenen. */
+function sanitiseSlots(input: unknown[]): MealSlot[] {
+  const out: MealSlot[] = [];
+  for (const [index, item] of input.entries()) {
+    if (typeof item !== "object" || item === null) continue;
+    const raw = item as Record<string, unknown>;
+    const name = String(raw["name"] ?? "").trim();
+    if (!name) continue;
+    const share = Number(raw["kcalShare"]);
+    out.push({
+      // Een moment zonder id is nieuw; leid er een af van de naam zodat een
+      // hernoemd moment zijn plek in opgeslagen dagen niet kwijtraakt.
+      id: String(raw["id"] ?? "").trim() || slugify(name) || `moment-${index}`,
+      name,
+      position: Number.isFinite(Number(raw["position"])) ? Number(raw["position"]) : index,
+      kcalShare: Number.isFinite(share) && share > 0 ? share : 0.1,
+      proteinShare:
+        raw["proteinShare"] === null || raw["proteinShare"] === undefined || raw["proteinShare"] === ""
+          ? null
+          : Number(raw["proteinShare"]),
+      enabled: raw["enabled"] !== false,
+      tags: Array.isArray(raw["tags"])
+        ? (raw["tags"] as unknown[]).map((t) => String(t).toLowerCase().trim()).filter(Boolean)
+        : [],
+      maxKcal: Number.isFinite(Number(raw["maxKcal"])) && Number(raw["maxKcal"]) > 0
+        ? Number(raw["maxKcal"])
+        : null,
+    });
+  }
+  return out.sort((a, b) => a.position - b.position);
+}
+
+function slugify(value: string): string {
+  return value.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+// ----------------------------------------------------------------- dagplan
+
+app.post("/api/day/generate", async (c) => {
+  const body = await c.req.json<DayRequest>().catch(() => ({}) as DayRequest);
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
+
+  const profile = await store.getProfile();
+  const targets = body.targets ?? dailyTargets(profile);
+  if (!targets) {
+    return c.json(
+      { error: "vul eerst je profiel in (leeftijd, geslacht, lengte, gewicht) via /api/profile" },
+      409,
+    );
+  }
+
+  const slots = body.slots ? sanitiseSlots(body.slots) : await store.getSlots();
+  if ((await store.countPlannable()) === 0) {
+    return c.json({ error: "nog geen doorgerekende recepten — draai eerst POST /api/ingest" }, 409);
+  }
+
+  const day = await generateDay(store, client, {
+    date: body.date ?? today(),
+    slots,
+    daily: targets,
+    diet: profile.diet,
+    excludedTerms: await store.getExclusions(),
+    excludeRecipeIds: body.excludeRecipeIds ?? [],
+    kcalMode: body.kcalMode,
+    candidatesPerSlot: body.candidatesPerSlot,
+  });
+
+  return c.json(day);
+});
+
+/** Ander recept voor één eetmoment, met vergelijkbare macro's. */
+app.post("/api/day/reroll", async (c) => {
+  const body = await c.req.json<RerollRequest>().catch(() => ({}) as RerollRequest);
+  if (!body.targets) return c.json({ error: "targets zijn verplicht" }, 400);
+
+  const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
+  const profile = await store.getProfile();
+
+  const plan = await rerollSlot(store, client, {
+    targets: body.targets,
+    excludeRecipeIds: body.excludeRecipeIds ?? [],
+    similarTo: body.similarTo,
+    diet: profile.diet,
+    excludedTerms: await store.getExclusions(),
+    kcalMode: body.kcalMode,
+    candidates: body.candidates,
+  });
+
+  if (!plan) {
+    return c.json({ error: "geen ander passend recept gevonden — scrape er meer", plan: null }, 409);
+  }
+  return c.json({ plan });
+});
+
+// -------------------------------------------------------- opgeslagen dagen
+
+app.post("/api/day/save", async (c) => {
+  const body = await c.req
+    .json<{ day?: DayPlan; id?: string; name?: string }>()
+    .catch(() => ({}) as { day?: DayPlan; id?: string; name?: string });
+  const day = body.day;
+  if (!day || !Array.isArray(day.meals)) return c.json({ error: "day is verplicht" }, 400);
+
+  const meals: SavedDayMeal[] = day.meals
+    .filter((meal) => meal.plan)
+    .map((meal) => ({
+      slotId: meal.slotId,
+      slotName: meal.slotName,
+      position: meal.position,
+      recipeId: meal.plan!.recipeId,
+      portions: meal.plan!.portions,
+      plan: meal.plan,
+    }));
+  if (meals.length === 0) return c.json({ error: "deze dag heeft geen maaltijden" }, 400);
+
+  const id = await storeFor(c.env).saveDay({
+    id: body.id,
+    date: day.date ?? today(),
+    name: body.name ?? null,
+    targets: day.targets,
+    totals: day.totals,
+    meals,
+  });
+  return c.json({ ok: true, id });
+});
+
+app.get("/api/days", async (c) => {
+  const to = c.req.query("to") ?? today();
+  // Standaard de week terug: dat is het venster dat het weekoverzicht toont.
+  const from = c.req.query("from") ?? shiftDate(to, -6);
+  return c.json({ from, to, days: await storeFor(c.env).listDays(from, to) });
+});
+
+app.get("/api/day/:id", async (c) => {
+  const day = await storeFor(c.env).getDay(c.req.param("id"));
+  if (!day) return c.json({ error: "dag niet gevonden" }, 404);
+  return c.json(day);
+});
+
+app.delete("/api/day/:id", async (c) => {
+  await storeFor(c.env).deleteDay(c.req.param("id"));
+  return c.json({ ok: true });
+});
+
+/** Boodschappenlijst over een periode opgeslagen dagen, of over één dag. */
+app.get("/api/shopping", async (c) => {
+  const store = storeFor(c.env);
+  const dayId = c.req.query("dayId");
+  const days = dayId
+    ? [await store.getDay(dayId)].filter((d): d is NonNullable<typeof d> => d !== null)
+    : await store.listDays(
+        c.req.query("from") ?? shiftDate(today(), -6),
+        c.req.query("to") ?? today(),
+      );
+
+  const inputs: ShoppingInput[] = [];
+  const names = new Set<string>();
+  for (const day of days) {
+    for (const meal of day.meals) {
+      const plan = meal.plan as Plan | null;
+      if (!plan?.ingredients) continue;
+      inputs.push({ label: `${day.date} · ${meal.slotName}`, plan });
+      for (const ingredient of plan.ingredients) names.add(ingredient.name);
+    }
+  }
+
+  // De productlinks komen uit de onthouden matches, in één query.
+  const webshopIds = await store.matchMap([...names]);
+  const lines = buildShoppingList(inputs.map((input) => ({ ...input, webshopIds })));
+  return c.json({ days: days.length, lines });
+});
+
+// ------------------------------------------------- voorkeuren en uitsluitingen
+
+app.get("/api/prefs", async (c) => c.json({ prefs: await storeFor(c.env).listPrefs() }));
+
+app.post("/api/prefs", async (c) => {
+  const body = await c.req
+    .json<{ recipeId?: string; status?: string }>()
+    .catch(() => ({}) as { recipeId?: string; status?: string });
+  if (!body.recipeId) return c.json({ error: "recipeId is verplicht" }, 400);
+  const status =
+    body.status === "fav" || body.status === "blocked" ? body.status : null;
+  await storeFor(c.env).setPref(body.recipeId, status);
+  return c.json({ ok: true, recipeId: body.recipeId, status });
+});
+
+app.get("/api/exclusions", async (c) => c.json({ terms: await storeFor(c.env).getExclusions() }));
+
+app.put("/api/exclusions", async (c) => {
+  const body = await c.req.json<{ terms?: unknown[] }>().catch(() => ({ terms: [] }));
+  const terms = (body.terms ?? []).map((t) => String(t));
+  await storeFor(c.env).putExclusions(terms);
+  return c.json({ terms: await storeFor(c.env).getExclusions() });
+});
+
+// ------------------------------------------------------------------- types
 
 interface PlanRequest {
   protein?: number;
@@ -168,15 +502,70 @@ interface PlanRequest {
   maxScale?: number;
 }
 
+interface DayRequest {
+  date?: string;
+  /** Wint van het profiel, voor een losse dag met een afwijkend doel. */
+  targets?: DailyTargets;
+  slots?: unknown[];
+  excludeRecipeIds?: string[];
+  kcalMode?: "target" | "max";
+  candidatesPerSlot?: number;
+}
+
+interface RerollRequest {
+  targets?: DailyTargets;
+  excludeRecipeIds?: string[];
+  similarTo?: DailyTargets;
+  kcalMode?: "target" | "max";
+  candidates?: number;
+}
+
+// ----------------------------------------------------------------- helpers
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function shiftDate(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Rekent recepten door en bewaart de uitkomst, zodat ze in de dagplanner
+ * verschijnen. Bewust foutbestendig per recept: één kapot recept mag de rest niet
+ * meeslepen, want dit draait op de achtergrond en niemand ziet de fout.
+ */
+async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
+  const store = new Store(env.DB);
+  const client = new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw));
+
+  for (const id of recipeIds) {
+    try {
+      let recipe = await store.getRecipe(id);
+      if (!recipe || recipe.ingredients.length === 0) {
+        recipe = await client.getRecipe(id);
+        if (!recipe || recipe.ingredients.length === 0) continue;
+        await store.putRecipe(recipe);
+      }
+      const resolved = await resolveRecipe(recipe, client, store);
+      await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+    } catch {
+      // volgende recept; dit draait buiten het antwoord om
+    }
+  }
+}
+
 async function ingest(env: Env, queries: string[], limit: number) {
   const store = new Store(env.DB);
-  const client = clientFor(env);
+  const client = new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw));
   const perQuery = Math.max(1, Math.ceil(limit / Math.max(1, queries.length)));
   let added = 0;
   const errors: string[] = [];
 
   for (const query of queries) {
-    let found;
+    let found: Recipe[];
     try {
       found = await client.searchRecipes(query, perQuery);
     } catch (err) {
@@ -184,10 +573,14 @@ async function ingest(env: Env, queries: string[], limit: number) {
       continue;
     }
 
+    // Zoekresultaten dragen geen ingredienten, maar wel titel en id. Die eerst
+    // wegschrijven: valt het ophalen van de detailpagina daarna om, dan weten we
+    // in elk geval nog dat dit recept bestaat.
+    for (const stub of found) await store.putRecipe(stub);
+
     for (const stub of found) {
       if (added >= limit) break;
       try {
-        // Search results carry no ingredients, so each one needs its detail page.
         const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
         if (!full || full.ingredients.length === 0) continue;
         await store.putRecipe(full);

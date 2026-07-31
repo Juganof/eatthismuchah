@@ -30,7 +30,12 @@ describe("Worker routes", () => {
   it("reports empty database statistics", async () => {
     const response = await fetchWorker("/api/stats");
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ recipes: 0 });
+    expect(await response.json()).toEqual({
+      recipes: 0,
+      plannable: 0,
+      scrapes: 0,
+      unparsed: 0,
+    });
   });
 
   it("validates search, plan and match requests", async () => {
