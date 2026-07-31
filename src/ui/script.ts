@@ -666,13 +666,28 @@ function loadAutoStatus() {
   api("/api/auto/status").then(renderAutoStatus).catch(() => {});
 }
 
+function loadAutoLogs() {
+  api("/api/browse/scrapes?limit=20").then((data) => {
+    $("autoLogs").innerHTML = data.rows.length
+      ? data.rows.map(browseScrape).join("")
+      : '<p class="muted">Nog geen verzoeken geweest.</p>';
+  }).catch(() => {});
+}
+
+$("autoLogsBox").addEventListener("toggle", () => {
+  if ($("autoLogsBox").open) loadAutoLogs();
+});
+
 $("autoRun").onclick = () => run($("autoRun"), async () => {
-  const r = await postJson("/api/auto/run", {});
+  // Handmatig op de knop drukken is een bewuste keuze om nu te kijken wat AH
+  // doet, dus die mag de afkoelperiode en het dagbudget overslaan.
+  const r = await postJson("/api/auto/run", { force: true });
   if (!r.ran) { toast("Overgeslagen: " + r.reason + "."); loadAutoStatus(); return; }
   const wat = r.mode === "repair" ? r.repaired + " recepten aangevuld" : r.added + " recepten opgehaald";
   toast(wat + " (" + r.detail + ").");
   loadAutoStatus();
   loadStats();
+  if ($("autoLogsBox").open) loadAutoLogs();
 });
 
 function loadStats() {

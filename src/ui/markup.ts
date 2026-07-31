@@ -142,6 +142,13 @@ export function browseTab(): string {
     <div class="actions">
       <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
     </div>
+    <details id="autoLogsBox">
+      <summary>Logs</summary>
+      <p class="muted">De laatste verzoeken aan ah.nl, met het HTTP-statuscode
+      per verzoek &mdash; zo zie je precies wat er misging in plaats van alleen
+      de samenvatting per ronde.</p>
+      <div id="autoLogs"></div>
+    </details>
   </div>
 
   <div class="card">
