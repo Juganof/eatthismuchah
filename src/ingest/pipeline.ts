@@ -51,6 +51,20 @@ export interface ClientOptions {
   maxRetries?: number;
   /** Bovengrens op het aantal verzoeken aan ah.nl; zie SubrequestBudgetError. */
   maxRequests?: number;
+  /** Sla de JSON-zoekdienst over; zie RECIPE_JSON_DEAD hieronder. */
+  skipRecipeJsonSearch?: boolean;
+}
+
+/** app_state-sleutel: de JSON-zoekdienst van Allerhande geeft alleen nog 404. */
+export const RECIPE_JSON_DEAD = "ah:recipe_json_dead";
+
+/**
+ * Of een antwoord van een JSON-endpoint ook echt JSON is. Een 404 die een
+ * HTML-foutpagina teruggeeft telt hier net zo goed als kapot: in beide gevallen
+ * heeft het geen zin dit endpoint volgende ronde weer te proberen.
+ */
+function isUsableJson(raw: { status: number; body: string }): boolean {
+  return raw.status < 400 && /^\s*[[{]/.test(raw.body);
 }
 
 export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptions) {
@@ -58,6 +72,13 @@ export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptio
     env.AH_USER_AGENT,
     (raw) => {
       void store.putRaw(raw);
+      // Eén keer vaststellen dat dit endpoint dood is, en dat onthouden over
+      // rondes heen: anders kost het elke twee minuten opnieuw een verzoek uit
+      // een budget van veertig, én is het een tweede verzoek binnen een seconde
+      // richting een site die juist op tempo let.
+      if (raw.url.includes("/service/search/recipes") && !isUsableJson(raw)) {
+        void store.setState(RECIPE_JSON_DEAD, "1");
+      }
       // Elk verzoek aan ah.nl ook als logregel: de statuscode per verzoek is
       // precies wat je wilt zien als er niets binnenkomt, en het archief is
       // daar te log voor — daar staat de hele payload in.
@@ -177,7 +198,10 @@ export async function ingestQueries(
   clientOptions?: ClientOptions,
 ): Promise<IngestResult> {
   const store = new Store(env.DB);
-  const client = scrapeClient(env, store, clientOptions);
+  const client = scrapeClient(env, store, {
+    ...clientOptions,
+    skipRecipeJsonSearch: (await store.getState(RECIPE_JSON_DEAD)) === "1",
+  });
   const perQuery = Math.max(1, Math.ceil(limit / Math.max(1, queries.length)));
 
   let added = 0;

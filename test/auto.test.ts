@@ -47,7 +47,12 @@ function stubAh(options: { keywords?: string; blockDetails?: boolean; blockProdu
       if (url.includes("/mobile-auth/")) {
         return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
       }
-      if (url.includes("/recepten-zoeken") || url.includes("/service/search/recipes")) {
+      // Zoals in productie: de JSON-dienst bestaat niet meer en geeft een
+      // HTML-foutpagina terug, de gewone zoekpagina werkt wel.
+      if (url.includes("/service/search/recipes")) {
+        return new Response("<html>Not found</html>", { status: 404 });
+      }
+      if (url.includes("/recepten-zoeken")) {
         return new Response(SEARCH_PAGE(["R-R101", "R-R102"]), { status: 200 });
       }
       if (url.includes("/allerhande/recept/")) {
@@ -174,19 +179,23 @@ describe("runAutoIngest", () => {
     expect(seen).toEqual(["ontbijt", "lunch", "snack", "diner"]);
   });
 
-  it("cools down after AH blocks it, and skips the next round", async () => {
+  it("cools down after two blocked rounds, and skips the round after that", async () => {
     stubAh({ blockDetails: true });
     const env = envFor();
 
+    // Eén geblokkeerde ronde is nog ruis; pas de tweede op rij is een blokkade.
     const first = await runAutoIngest(env, fastConfig);
     expect(first.blocked).toBeGreaterThan(0);
-    expect(first.cooldownUntil).toBeGreaterThan(Date.now());
+    expect(first.cooldownUntil).toBeUndefined();
+
+    const second = await runAutoIngest(env, fastConfig);
+    expect(second.cooldownUntil).toBeGreaterThan(Date.now());
 
     // Doorgaan alsof er niets is maakt het alleen erger, dus de volgende ronde
     // hoort zichzelf over te slaan.
-    const second = await runAutoIngest(env, fastConfig);
-    expect(second.ran).toBe(false);
-    expect(second.reason).toContain("afkoelen");
+    const third = await runAutoIngest(env, fastConfig);
+    expect(third.ran).toBe(false);
+    expect(third.reason).toContain("afkoelen");
   });
 
   it("doubles the cooldown on each consecutive block, capped at the maximum", async () => {
@@ -550,5 +559,30 @@ describe("bijvullen uitzetten", () => {
     await runAutoIngest(env, fastConfig);
 
     expect(await store.countRecipes()).toBe(0);
+  });
+});
+
+describe("de dode JSON-zoekdienst", () => {
+  it("wordt na één 404 niet meer geprobeerd, ook niet in een volgende ronde", async () => {
+    const calls = stubAh();
+    const env = envFor();
+    const store = new Store(env.DB);
+    // Een bruikbaar recept in de database, anders gaat de tweede ronde naar
+    // koppelen en zoekt hij helemaal niet — dan bewijst deze test niets.
+    await seedRecipes(store, [
+      { id: "R-SEED", title: "Kwark", ingredients: [{ name: "kwark", grams: 200, per100g: FOODS.kwark! }] },
+    ]);
+
+    await runAutoIngest(env, fastConfig);
+    const eerste = calls.filter((c) => c.includes("/service/search/recipes")).length;
+
+    // Nieuwe ronde = nieuw isolate in productie, dus dit moet uit de database
+    // komen en niet uit een variabele die de ronde niet overleeft.
+    resetEndpointState();
+    calls.length = 0;
+    await runAutoIngest(env, fastConfig);
+
+    expect(eerste).toBeGreaterThan(0);
+    expect(calls.filter((c) => c.includes("/service/search/recipes"))).toHaveLength(0);
   });
 });

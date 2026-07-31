@@ -106,6 +106,8 @@ export class AhClient {
       maxRetries?: number;
       backoffMs?: number;
       maxRequests?: number;
+      /** Sla de (dode) JSON-zoekdienst over zonder hem eerst te proberen. */
+      skipRecipeJsonSearch?: boolean;
     } = {},
   ) {
     // 700 ms is genoeg om onder de botbescherming te blijven en houdt een ingest
@@ -116,6 +118,10 @@ export class AhClient {
     // 40 is de veilige marge onder de 50 van het gratis plan: er moeten ook nog
     // een auth-aanroep en de laatste herkansingen in passen.
     this.maxRequests = options.maxRequests ?? 40;
+    // Een isolate leeft één cron-ronde; de kennis dat dit endpoint dood is,
+    // komt daarom van buiten (uit app_state) in plaats van elke ronde opnieuw
+    // met een 404 betaald te worden.
+    if (options.skipRecipeJsonSearch) recipeSearchJsonDead = true;
   }
 
   /** Hoeveel verzoeken deze client al gedaan heeft, en hoeveel er nog mogen. */

@@ -77,10 +77,10 @@ export interface AutoConfig {
   /** Recepten die per ronde opnieuw doorgerekend worden; kost geen verzoeken. */
   recomputeBatch: number;
   /**
-   * Vanaf hoeveel blokkades in één ronde we ons gedeisd houden. Eén enkele 403
-   * op één pagina zegt niets over het tempo — dat is vaak gewoon een recept dat
+   * Vanaf hoeveel opeenvolgende rondes mét blokkade we ons gedeisd houden. Eén
+   * enkele 403 zegt niets over het tempo — dat is vaak gewoon een recept dat
    * niet meer bestaat — en daar de hele automaat een uur voor stilleggen kost
-   * veel meer dan het oplevert.
+   * veel meer dan het oplevert. Twee rondes op rij is een ander verhaal.
    */
   cooldownAfterBlocks: number;
   /**
@@ -98,7 +98,10 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   minIntervalMs: 700,
   cooldownMs: 30 * 60 * 1000,
   maxCooldownMs: 4 * 60 * 60 * 1000,
-  backoffMs: 1500,
+  // Ruim: uit de log bleek een blokkade tientallen seconden te duren, dus
+  // herkansen na 1,5 en 3 seconden liep gegarandeerd tegen dezelfde muur. Op de
+  // cron mag dat wachten — daar kijkt niemand naar, en het scheelt een ronde.
+  backoffMs: 8000,
   enrichBatch: 6,
   enrichEvery: 3,
   purgeGraceMs: 24 * 60 * 60 * 1000,
@@ -313,16 +316,22 @@ async function applyCooldown(
     await store.setState(BLOCK_STREAK, "0");
     return null;
   }
-  // Eén geblokkeerde pagina is ruis, geen blokkade. Dat verschil is duur
-  // gebleken: één recept dat structureel 403 gaf, legde de hele automaat
-  // anderhalf uur stil terwijl alle andere verzoeken gewoon 200 gaven.
-  if (blocked < config.cooldownAfterBlocks) {
-    await store.log("info", "auto", `${blocked}x geblokkeerd; te weinig om af te koelen`);
-    return null;
-  }
+  // De teller loopt over rondes, niet over verzoeken binnen één ronde. Eén
+  // geblokkeerde pagina is ruis — dat kostte ons anderhalf uur stilstand voor
+  // één kapot recept — maar twee rondes op rij die tegen een muur lopen is wél
+  // een tempo-blokkade, en dan is stil zijn de enige weg terug.
   const streak = Number((await store.getState(BLOCK_STREAK)) ?? 0) + 1;
   await store.setState(BLOCK_STREAK, String(streak));
-  const cooldownMs = Math.min(config.cooldownMs * 2 ** (streak - 1), config.maxCooldownMs);
+  if (streak < config.cooldownAfterBlocks) {
+    await store.log("info", "auto", `${blocked}x geblokkeerd; nog geen reden om af te koelen`, {
+      rondesOpEenRij: streak,
+    });
+    return null;
+  }
+  const cooldownMs = Math.min(
+    config.cooldownMs * 2 ** (streak - config.cooldownAfterBlocks),
+    config.maxCooldownMs,
+  );
   const until = now + cooldownMs;
   await store.setState(COOLDOWN_UNTIL, String(until));
   await store.log("warn", "auto", `AH blokkeerde ${blocked}x; ${Math.round(cooldownMs / 60000)} min afkoelen`, {

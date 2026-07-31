@@ -301,7 +301,10 @@ een tiende seconde leveren 403's op, terwijl dezelfde pagina's rustig achter elk
 gewoon binnenkomen. Een zoekopdracht geeft alleen titels, dus als de detailpagina
 daarna geblokkeerd wordt, blijft een recept met 0 ingredienten achter. De scraper houdt
 daarom minimaal 700 ms tussen twee verzoeken aan en probeert een 403 opnieuw met
-oplopende wachttijd. Blijven er toch lege recepten staan, dan haalt
+oplopende wachttijd. Die wachttijd staat op de cron bewust hoog (8 seconden,
+`AUTO_BACKOFF_MS`): uit de log bleek zo'n blokkade tientallen seconden te duren, dus
+herkansen na anderhalve seconde liep gegarandeerd tegen dezelfde muur. Afkoelen gebeurt
+pas na twee rondes op rij met blokkades — één 403 is ruis. Blijven er toch lege recepten staan, dan haalt
 `POST /api/repair` ze alsnog op — het aantal staat in `/api/stats`.
 
 **Voedingswaarden zijn schattingen.** Stukgewichten ("1 ui = 110 g") en dichtheden
