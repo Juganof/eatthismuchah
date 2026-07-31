@@ -1,10 +1,10 @@
 import type { AhClient } from "../ah/client";
-import type { Nutrients } from "../ah/types";
+import type { Nutrients, ResolvedRecipe } from "../ah/types";
 import type { SlotCandidate, Store } from "../db/queries";
-import { resolveRecipe } from "../nutrition/resolve";
+import { coverageOf, resolveRecipe } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
-import { buildTargets, planRecipe, type Plan } from "./plan";
+import { buildTargets, planRecipe, planUniform, type Plan } from "./plan";
 
 /**
  * Stelt een hele dag samen: per eetmoment het recept dat, na herschalen, het
@@ -97,6 +97,28 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
   return Math.sqrt(sum);
 }
 
+/**
+ * Kiest hoe dit recept herschaald wordt.
+ *
+ * Kennen we de voedingswaarde per ingredient goed genoeg, dan mag de solver zijn
+ * werk doen: die kan de kip omhoog en de rijst omlaag draaien. Kennen we alleen
+ * het totaal — wat het geval is bij alles wat we van AH's eigen receptpagina
+ * overnamen — dan schalen we het gerecht als geheel. Dat is minder fijnmazig maar
+ * wel eerlijk, en oneindig veel beter dan rekenen met halve nullen.
+ */
+function planFor(
+  resolved: ResolvedRecipe,
+  candidate: SlotCandidate,
+  macroTargets: ReturnType<typeof buildTargets>,
+): Plan | null {
+  const coverage = coverageOf(resolved);
+  if (coverage >= 0.5) return planRecipe(resolved, macroTargets, { portions: 1 });
+
+  const known = candidate.nutrition;
+  if (!known?.kcal) return null;
+  return planUniform(resolved, known, macroTargets, { portions: 1 });
+}
+
 /** Plant één moment: haalt kandidaten op, herschaalt ze en kiest de beste. */
 async function planSlot(
   store: Store,
@@ -129,9 +151,12 @@ async function planSlot(
   for (const candidate of candidates) {
     const recipe = await store.getRecipe(candidate.id);
     if (!recipe || recipe.ingredients.length === 0) continue;
-    // Alle producten staan al in de cache, dus dit doet geen netwerk.
-    const resolved = await resolveRecipe(recipe, client, store);
-    const plan = planRecipe(resolved, macroTargets, { portions: 1 });
+
+    // Plannen mag nooit het netwerk op: er worden tientallen recepten
+    // doorgerekend en elk ongematcht ingredient zou een AH-zoekopdracht kosten.
+    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
+    const plan = planFor(resolved, candidate, macroTargets);
+    if (!plan) continue;
 
     let score = scoreOf(plan, candidate, options.slotTags ?? []);
     // Bij herrollen weegt gelijkenis met het vervangen gerecht net zo zwaar als
@@ -161,6 +186,30 @@ function sumPerPortion(meals: DayMeal[]): Nutrients {
     out[key] = Math.round(sum * 10) / 10;
   }
   return out;
+}
+
+/**
+ * Het lege dagoverzicht: alle eetmomenten met hun doel, nog zonder recept. De
+ * UI toont dit meteen, zodat je ziet hoe je dag eruitziet voordat er iets
+ * gegenereerd is — en per moment kunt kiezen wat je invult.
+ */
+export function blankDay(date: string, slots: MealSlot[], daily: DailyTargets): DayPlan {
+  const meals: DayMeal[] = splitTargets(daily, slots).map((entry) => ({
+    slotId: entry.slot.id,
+    slotName: entry.slot.name,
+    position: entry.slot.position,
+    targets: entry.targets,
+    slotTags: entry.slot.tags,
+    plan: null,
+  }));
+
+  return {
+    date,
+    targets: daily,
+    meals,
+    totals: sumPerPortion(meals),
+    deviation: deviationOf(daily, sumPerPortion(meals)),
+  };
 }
 
 export async function generateDay(

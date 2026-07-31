@@ -53,6 +53,7 @@ async function resolveProduct(
   ingredient: RawIngredient,
   client: AhClient,
   store: Store,
+  cacheOnly = false,
 ): Promise<{ product: Product | null; score: number }> {
   const cached = await store.getMatch(ingredient.name);
   if (cached !== undefined) {
@@ -60,6 +61,11 @@ async function resolveProduct(
     const product = await store.getProduct(cached.webshopId);
     if (product) return { product, score: cached.score };
   }
+
+  // Bij plannen mag er niets naar ah.nl: dat zijn tientallen zoekopdrachten per
+  // recept maal het aantal kandidaten, en met de verplichte pauzes ertussen loopt
+  // dat in de minuten. Onbekend is dan gewoon onbekend.
+  if (cacheOnly) return { product: null, score: 0 };
 
   let candidates: Product[];
   try {
@@ -92,16 +98,22 @@ async function resolveProduct(
   return { product: full, score: match.score };
 }
 
+/**
+ * `cacheOnly` maakt dit een pure databaseoperatie: geen enkele aanroep naar
+ * ah.nl. Dat is wat het plannen gebruikt — daar worden tientallen recepten
+ * doorgerekend en is wachten op het netwerk geen optie.
+ */
 export async function resolveRecipe(
   recipe: Recipe,
   client: AhClient,
   store: Store,
+  options: { cacheOnly?: boolean } = {},
 ): Promise<ResolvedRecipe> {
   const ingredients: ResolvedIngredient[] = [];
 
   for (const raw of recipe.ingredients) {
     const { grams, source } = toGrams(raw);
-    const { product, score } = await resolveProduct(raw, client, store);
+    const { product, score } = await resolveProduct(raw, client, store, options.cacheOnly);
     ingredients.push({
       raw,
       grams,

@@ -97,6 +97,7 @@ export function dayTab(): string {
       </div>
     </div>
     <button id="generateDay">Genereer hele dag</button>
+    <p class="muted" id="dayHint">Of vul hieronder de eetmomenten los in.</p>
     <div id="dayTotals"></div>
   </div>
   <div id="dayMeals"></div>
@@ -133,6 +134,17 @@ export function browseTab(): string {
   return `
 <section class="panel" id="panel-database" hidden>
   <div class="card">
+    <h2>Automatisch bijvullen</h2>
+    <p class="muted">De database vult zichzelf elk kwartier een beetje aan, in het
+    tempo dat ah.nl toestaat. Lege recepten worden eerst afgemaakt, daarna komen
+    de eetmomenten om de beurt aan bod.</p>
+    <div id="autoStatus"></div>
+    <div class="actions">
+      <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Wat zit er in de database?</h2>
     <div class="tabs" id="browseKinds" role="tablist">
       <button class="tab browse-kind" data-kind="recipes" aria-selected="true">Recepten</button>
@@ -154,17 +166,6 @@ export function browseTab(): string {
 /** Beheer: scrapen, archief en diagnose. */
 export function adminCard(): string {
   return `
-  <div class="card">
-    <h2>Automatisch bijvullen</h2>
-    <p class="muted">De database vult zichzelf elk kwartier een beetje aan, in het
-    tempo dat ah.nl toestaat. Lege recepten worden eerst afgemaakt, daarna komen
-    de eetmomenten om de beurt aan bod.</p>
-    <div id="autoStatus"></div>
-    <div class="actions">
-      <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
-    </div>
-  </div>
-
   <div class="card">
     <details>
       <summary>Beheer &amp; database</summary>

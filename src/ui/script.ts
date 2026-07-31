@@ -79,7 +79,9 @@ function selectTab(name) {
     panel.hidden = panel.id !== "panel-" + name;
   });
   if (name === "week") loadWeek();
-  if (name === "database") loadBrowse();
+  if (name === "database") { loadBrowse(); loadAutoStatus(); }
+  // Het lege overzicht kost niets en laat meteen zien hoe de dag verdeeld is.
+  if (name === "dag" && !currentDay) loadBlankDay();
 }
 
 document.querySelectorAll("#mainTabs .tab").forEach((tab) => {
@@ -203,11 +205,22 @@ $("saveSlots").onclick = () => run($("saveSlots"), async () => {
 
 // ------------------------------------------------------------------- dag
 
+function mealHead(meal) {
+  return '<div class="meal-head"><span class="slot">' + escapeHtml(meal.slotName) + '</span>'
+    + '<span class="muted">doel ' + g(meal.targets.kcal) + ' kcal &middot; '
+    + g(meal.targets.protein) + 'g eiwit</span></div>';
+}
+
 function planCard(meal) {
   const p = meal.plan;
+  // Nog niets ingevuld: toon wél het moment en zijn doel, met een knop om juist
+  // dit moment te vullen. Zo zie je hoe je dag eruitziet voordat er iets staat.
   if (!p) {
-    return '<div class="card"><div class="meal-head"><span class="slot">' + escapeHtml(meal.slotName) + '</span></div>'
-      + '<p class="note">' + escapeHtml(meal.note || "geen recept gevonden") + '</p></div>';
+    return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
+      + mealHead(meal)
+      + (meal.note ? '<p class="note">' + escapeHtml(meal.note) + '</p>' : '<p class="muted">Nog niet ingevuld.</p>')
+      + '<div class="actions"><button class="secondary small fill" type="button">Genereer dit eetmoment</button></div>'
+      + '</div>';
   }
 
   const rows = p.ingredients.map((i) => {
@@ -226,8 +239,7 @@ function planCard(meal) {
     : "";
 
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
-    + '<div class="meal-head"><span class="slot">' + escapeHtml(meal.slotName) + '</span>'
-    + '<span class="muted">doel ' + g(meal.targets.kcal) + ' kcal &middot; ' + g(meal.targets.protein) + 'g eiwit</span></div>'
+    + mealHead(meal)
     + '<strong>' + escapeHtml(p.title) + '</strong>'
     + macroChips(p.perPortion)
     + rows
@@ -257,8 +269,19 @@ function renderDay(day) {
   currentDay = day;
   renderTotals(day);
   $("dayMeals").innerHTML = day.meals.map(planCard).join("");
-  $("daySaveCard").hidden = false;
+  // Opslaan kan pas als er iets te bewaren valt.
+  $("daySaveCard").hidden = !day.meals.some((m) => m.plan);
   bindMealButtons();
+}
+
+/** Het lege overzicht: alle eetmomenten met hun doel, nog zonder recepten. */
+async function loadBlankDay() {
+  try {
+    const day = await api("/api/day/blank?date=" + encodeURIComponent($("dayDate").value || ""));
+    renderDay(day);
+  } catch (err) {
+    $("dayMeals").innerHTML = '<div class="card"><p class="note">' + escapeHtml(err.message) + '</p></div>';
+  }
 }
 
 function mealFor(slotId) {
@@ -270,7 +293,14 @@ function bindMealButtons() {
     const slotId = card.dataset.slot;
     if (!slotId) return;
     const meal = mealFor(slotId);
-    if (!meal || !meal.plan) return;
+    if (!meal) return;
+
+    // Leeg moment: één knop, om juist dit moment in te vullen.
+    if (!meal.plan) {
+      const fill = card.querySelector(".fill");
+      if (fill) fill.onclick = (event) => run(event.target, () => fillMeal(meal));
+      return;
+    }
 
     card.querySelector(".reroll").onclick = (event) => run(event.target, () => replaceMeal(meal));
 
@@ -290,16 +320,34 @@ function bindMealButtons() {
   });
 }
 
+/** Vult één leeg eetmoment in, zonder de rest van de dag aan te raken. */
+async function fillMeal(meal) {
+  const data = await postJson("/api/day/slot", {
+    targets: meal.targets,
+    excludeRecipeIds: chosenToday(meal.slotId),
+    slotTags: meal.slotTags || [],
+    kcalMode: $("dayKcalMode").value
+  });
+  meal.plan = data.plan;
+  meal.note = undefined;
+  recomputeTotals();
+  renderDay(currentDay);
+}
+
+/** De recepten die vandaag al ergens anders staan; die wil je niet dubbel. */
+function chosenToday(exceptSlotId) {
+  return currentDay.meals
+    .filter((m) => m.slotId !== exceptSlotId && m.plan)
+    .map((m) => m.plan.recipeId);
+}
+
 /** Zoekt een ander recept voor dit moment en zet het op het scherm. */
 async function replaceMeal(meal) {
   rejected[meal.slotId] = (rejected[meal.slotId] || []).concat([meal.plan.recipeId]);
-  // De andere maaltijden van vandaag horen er ook niet nog een keer bij.
-  const alsoToday = currentDay.meals
-    .filter((m) => m.slotId !== meal.slotId && m.plan)
-    .map((m) => m.plan.recipeId);
   const data = await postJson("/api/day/reroll", {
     targets: meal.targets,
-    excludeRecipeIds: rejected[meal.slotId].concat(alsoToday),
+    // De andere maaltijden van vandaag horen er ook niet nog een keer bij.
+    excludeRecipeIds: rejected[meal.slotId].concat(chosenToday(meal.slotId)),
     similarTo: meal.plan.perPortion,
     slotTags: meal.slotTags || [],
     kcalMode: $("dayKcalMode").value
@@ -327,6 +375,9 @@ $("generateDay").onclick = () => run($("generateDay"), async () => {
   });
   renderDay(day);
 });
+
+// Van datum wisselen betekent een andere dag: begin weer leeg.
+$("dayDate").onchange = () => loadBlankDay();
 
 $("saveDay").onclick = () => run($("saveDay"), async () => {
   if (!currentDay) throw new Error("genereer eerst een dag");
@@ -607,5 +658,4 @@ api("/api/profile").then(fillProfile).catch(() => {});
 api("/api/slots").then(renderSlots).catch(() => {});
 api("/api/exclusions").then((d) => { $("exclusions").value = d.terms.join(", "); }).catch(() => {});
 loadStats();
-loadAutoStatus();
 `;

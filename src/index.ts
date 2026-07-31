@@ -14,7 +14,7 @@ import {
 } from "./ingest/pipeline";
 import { splitTargets, type MealSlot } from "./nutrition/split";
 import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
-import { generateDay, rerollSlot, type DayPlan } from "./optimize/day";
+import { blankDay, generateDay, rerollSlot, type DayPlan } from "./optimize/day";
 import { buildTargets, planRecipe, rankPlans, type Plan } from "./optimize/plan";
 import { buildShoppingList, type ShoppingInput } from "./plan/shopping";
 import { renderPage } from "./ui/page";
@@ -303,8 +303,9 @@ app.post("/api/generate", async (c) => {
   for (const summary of shortlist) {
     const recipe = await store.getRecipe(summary.id);
     if (!recipe) continue;
-    // Resolution is cache-served here: ingest already looked every product up.
-    const resolved = await resolveRecipe(recipe, client, store);
+    // Nooit het netwerk op tijdens plannen: dit loopt over tientallen recepten
+    // en elk ongematcht ingredient zou een AH-zoekopdracht kosten.
+    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
     plans.push(
       planRecipe(resolved, targets, {
         portions: body.portions ?? 1,
@@ -448,6 +449,48 @@ app.post("/api/day/generate", async (c) => {
   });
 
   return c.json(day);
+});
+
+/**
+ * Het lege dagoverzicht: alle eetmomenten met hun doel, nog zonder recept. Puur
+ * uit de database, dus dit is meteen klaar.
+ */
+app.get("/api/day/blank", async (c) => {
+  const store = storeFor(c.env);
+  const targets = dailyTargets(await store.getProfile());
+  if (!targets) {
+    return c.json(
+      { error: "vul eerst je profiel in (leeftijd, geslacht, lengte, gewicht)" },
+      409,
+    );
+  }
+  return c.json(blankDay(c.req.query("date") ?? today(), await store.getSlots(), targets));
+});
+
+/** Vult één eetmoment in. Zelfde werk als herrollen, zonder iets te vervangen. */
+app.post("/api/day/slot", async (c) => {
+  const body = await c.req.json<RerollRequest>().catch(() => ({}) as RerollRequest);
+  if (!body.targets) return c.json({ error: "targets zijn verplicht" }, 400);
+
+  const store = storeFor(c.env);
+  const profile = await store.getProfile();
+  const plan = await rerollSlot(store, clientFor(c.env, c.executionCtx), {
+    targets: body.targets,
+    excludeRecipeIds: body.excludeRecipeIds ?? [],
+    slotTags: body.slotTags,
+    diet: profile.diet,
+    excludedTerms: await store.getExclusions(),
+    kcalMode: body.kcalMode,
+    candidates: body.candidates,
+  });
+
+  if (!plan) {
+    return c.json(
+      { error: "geen passend recept in de database — laat de scraper eerst meer ophalen", plan: null },
+      409,
+    );
+  }
+  return c.json({ plan });
 });
 
 /** Ander recept voor één eetmoment, met vergelijkbare macro's. */

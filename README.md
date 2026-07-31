@@ -28,6 +28,18 @@ Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon geb
    het ene moment te veel of te weinig opleverde door naar de volgende, zodat de dag
    klopt in plaats van alleen elk moment apart.
 
+**Plannen raakt ah.nl nooit aan.** Dat klinkt vanzelfsprekend maar was het niet: een
+ingredient zonder gekoppeld product liet `resolveRecipe` alsnog zoeken, en met
+tientallen kandidaten maal tien ingredienten maal de verplichte pauze ertussen liep het
+genereren van een dag in de minuten. Plannen draait nu in `cacheOnly`-modus en is puur
+een databaseoperatie — een dag staat er in een fractie van een seconde.
+
+Daardoor is er wel een tweede manier van herschalen nodig. AH levert de voedingswaarde
+per portie maar niet per ingredient, en de solver verdeelt juist over ingredienten.
+Kennen we alleen het totaal, dan schaalt `planUniform` het gerecht als geheel met één
+factor: minder fijnmazig, maar eerlijk, en oneindig veel beter dan rekenen met een
+optelsom van half gematchte producten.
+
 Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
 en ingrediënten kun je vastzetten met `locked`.
 
@@ -135,9 +147,10 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 - **Eetmomenten** — zoveel momenten als je wilt, met per moment een aandeel van de dag
   en zoekhints (bijv. `kwark, havermout` bij het ontbijt). De aandelen zijn relatief:
   ze worden genormaliseerd, dus je hoeft niet op 100% uit te komen.
-- **Dag** — één knop voor een compleet dagmenu. Per maaltijd kun je om een ander
-  recept vragen (vergelijkbare macro's, ander gerecht), favoriet maken of blokkeren.
-  Onderaan het dagtotaal tegenover je doel, en "Dag opslaan".
+- **Dag** — je ziet meteen alle eetmomenten met hun doel, nog leeg. Vul ze los in met
+  "Genereer dit eetmoment", of laat de hele dag in één klik samenstellen. Per maaltijd
+  kun je om een ander recept vragen (vergelijkbare macro's, ander gerecht), favoriet
+  maken of blokkeren. Onderaan het dagtotaal tegenover je doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
   ingrediënten over alle dagen bij elkaar opgeteld, met links naar het AH-product.
 - **Database** — alles wat er in staat: recepten (met labels, voedingswaarde en welke
@@ -150,7 +163,9 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | --- | --- |
 | `GET`/`PUT /api/profile` | Profiel lezen en opslaan; geeft TDEE en dagdoelen mee |
 | `GET`/`PUT /api/slots` | Eetmomenten en hun verdeling |
+| `GET /api/day/blank` | Leeg dagoverzicht: alle eetmomenten met hun doel |
 | `POST /api/day/generate` | Hele dag samenstellen |
+| `POST /api/day/slot` | Eén eetmoment invullen |
 | `POST /api/day/reroll` | Ander recept voor één eetmoment |
 | `POST /api/day/save` | Dag bewaren |
 | `GET /api/days?from=&to=` | Opgeslagen dagen in een periode |
@@ -213,7 +228,7 @@ authenticatie op. Zet de worker niet op een publieke URL die je met anderen deel
 ## Ontwikkelen
 
 ```bash
-npm test          # 178 tests, geen netwerk nodig
+npm test          # 185 tests, geen netwerk nodig
 npm run typecheck
 npm run dev
 ```
