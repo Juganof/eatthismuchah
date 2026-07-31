@@ -6,6 +6,7 @@ const AUTH_URL = "https://api.ah.nl/mobile-auth/v1/auth/token/anonymous";
 const PRODUCT_SEARCH_URL = "https://api.ah.nl/mobile-services/product/search/v2";
 const PRODUCT_DETAIL_URL = "https://api.ah.nl/mobile-services/product/detail/v4/fir";
 const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
+const PRODUCT_SEARCH_PAGE = "https://www.ah.nl/producten/zoeken";
 const RECIPE_BASE = "https://www.ah.nl/allerhande";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,6 +30,14 @@ let lastRequestAt = 0;
 let recipeSearchJsonDead = false;
 
 /**
+ * De mobiele API vraagt eerst een anoniem token op, en dat verzoek kreeg in de
+ * praktijk 403 terug — waarna élke productzoekopdracht faalde en er dus geen
+ * enkel ingredient meer gekoppeld kon worden. De website zelf doet het gewoon,
+ * dus na zo'n weigering gaat de rest van dit isolate via www.ah.nl.
+ */
+let productApiDead = false;
+
+/**
  * Een worker mag maar een beperkt aantal uitgaande verzoeken doen per aanroep
  * (op het gratis plan 50). Ging dat op, dan brak Cloudflare de ronde midden in
  * een recept af met "Too many subrequests" — een fout per resterend recept, en
@@ -44,6 +53,17 @@ export class SubrequestBudgetError extends Error {
 
 export const isBudgetError = (err: unknown): err is SubrequestBudgetError =>
   err instanceof SubrequestBudgetError || /subrequest/i.test(err instanceof Error ? err.message : "");
+
+/**
+ * Zet de module-brede vlaggen terug (welke AH-endpoints als dood gelden). Alleen
+ * voor tests: die draaien in één isolate, en een vlag die van de ene test in de
+ * andere lekt levert een raadselachtige mislukking op.
+ */
+export function resetEndpointState(): void {
+  recipeSearchJsonDead = false;
+  productApiDead = false;
+  lastRequestAt = 0;
+}
 
 /** Wat er gescraped werd, zodat het archief doorzoekbaar blijft per soort. */
 export type ScrapeKind = "recipe" | "recipe_search" | "product" | "product_search";
@@ -201,6 +221,23 @@ export class AhClient {
   // ---------------------------------------------------------------- products
 
   async searchProducts(query: string, size = 10): Promise<Product[]> {
+    if (!productApiDead) {
+      try {
+        return await this.searchProductsApi(query, size);
+      } catch (err) {
+        if (err instanceof SubrequestBudgetError) throw err;
+        // Alleen het weigeren van het token is reden om over te stappen. Een
+        // 403 of 429 op de zoekopdracht zelf is Akamai's tempo-blokkade, en die
+        // treft de website net zo hard: dat hoort een blokkade te blijven, niet
+        // stilletjes "geen product gevonden" te worden.
+        if (!/auth failed/.test(err instanceof Error ? err.message : "")) throw err;
+        productApiDead = true;
+      }
+    }
+    return await this.searchProductsHtml(query, size);
+  }
+
+  private async searchProductsApi(query: string, size: number): Promise<Product[]> {
     // Ask for a few extras because AH places virtual multi-packs first for some
     // searches; those cannot supply a meaningful per-100g nutrition record.
     const upstreamSize = size + 10;
@@ -213,6 +250,22 @@ export class AhClient {
       .map((p) => toProductStub(p))
       .filter((p): p is Product => p !== null)
       .slice(0, size);
+  }
+
+  /**
+   * Dezelfde zoekopdracht, maar via de gewone webshoppagina. De paginastate
+   * bevat de producten als objecten; leest die niet, dan blijven de links naar
+   * productpagina's over — het webshop-id staat in de URL en de titel in de slug,
+   * en meer heeft de matcher niet nodig om te scoren.
+   */
+  private async searchProductsHtml(query: string, size: number): Promise<Product[]> {
+    const html = await this.htmlGet(
+      `${PRODUCT_SEARCH_PAGE}?query=${encodeURIComponent(query)}`,
+      { kind: "product_search", ref: query },
+    );
+    const embedded = collectProducts(extractEmbeddedJson(html));
+    const found = embedded.length > 0 ? embedded : parseProductLinks(html);
+    return found.slice(0, size);
   }
 
   /** Full product record including nutrition, which search results omit. */
@@ -431,6 +484,54 @@ function htmlText(value: string): string {
   return decodeHtml(value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
 }
 
+/** Alles in een payload dat een product kan zijn, ontdaan van dubbelen. */
+export function collectProducts(root: unknown): Product[] {
+  const out: Product[] = [];
+  const seen = new Set<string>();
+
+  const visit = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      v.forEach(visit);
+      return;
+    }
+    if (!isRecord(v)) return;
+    if ("webshopId" in v && ("title" in v || "name" in v)) {
+      const stub = toProductStub(v);
+      if (stub && !seen.has(stub.webshopId)) {
+        seen.add(stub.webshopId);
+        out.push(stub);
+      }
+    }
+    Object.values(v).forEach(visit);
+  };
+
+  visit(root);
+  return out;
+}
+
+/**
+ * De laatste terugval: de links naar productpagina's in de HTML. De slug is de
+ * titel met streepjes ("ah-magere-kwark"), wat voor de matcher net zo bruikbaar
+ * is als de echte titel — die vergelijkt toch op losse woorden.
+ */
+export function parseProductLinks(html: string): Product[] {
+  const out: Product[] = [];
+  const seen = new Set<string>();
+  for (const match of html.matchAll(/\/producten\/product\/wi(\d+)\/([a-z0-9-]+)/gi)) {
+    const id = match[1];
+    const slug = match[2];
+    if (!id || !slug || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      webshopId: id,
+      title: slug.replace(/-/g, " ").trim(),
+      salesUnitSize: null,
+      per100g: {},
+    });
+  }
+  return out;
+}
+
 /** Recognises anything in a payload that looks like a recipe and normalises it. */
 export function collectRecipes(root: unknown): Recipe[] {
   const out: Recipe[] = [];
@@ -470,7 +571,7 @@ export function collectRecipes(root: unknown): Recipe[] {
           4,
         imageUrl: findImageUrl(v),
         ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
-        keywords: parseKeywords(v["keywords"] ?? v["recipeCategory"]),
+        keywords: parseKeywords(v["keywords"] ?? v["tags"] ?? v["recipeCategory"], v["classifications"]),
         nutritionPerServing: parseNutritionLd(v["nutrition"]),
       });
     }
@@ -533,14 +634,28 @@ function findImageUrl(v: Record<string, unknown>): string | null {
  * "gezond, vooraf te maken, brood/sandwiches, tussendoortje, grillen".
  * Schuine strepen scheiden varianten van hetzelfde label, dus die splitsen we ook.
  */
-export function parseKeywords(v: unknown): string[] {
-  const raw = typeof v === "string" ? v.split(",") : Array.isArray(v) ? v : [];
+export function parseKeywords(v: unknown, extra?: unknown): string[] {
   const out = new Set<string>();
-  for (const item of raw) {
-    if (typeof item !== "string") continue;
-    for (const part of item.split("/")) {
+
+  const add = (value: unknown): void => {
+    if (typeof value !== "string") return;
+    for (const part of value.split("/")) {
       const clean = part.trim().toLowerCase();
       if (clean) out.add(clean);
+    }
+  };
+
+  for (const source of [v, extra]) {
+    if (typeof source === "string") {
+      source.split(",").forEach(add);
+      continue;
+    }
+    if (!Array.isArray(source)) continue;
+    for (const item of source) {
+      // De paginastate schrijft ze als {key: "menugang", value: "borrelhapje"};
+      // daar is de waarde het label. De ld+json geeft gewoon strings.
+      if (isRecord(item)) add(item["value"]);
+      else add(item);
     }
   }
   return [...out];
@@ -580,16 +695,42 @@ export function parseIngredients(v: unknown): RawIngredient[] {
       continue;
     }
     if (!isRecord(item)) continue;
+    // AH schrijft de naam als {singular, plural}: het enkelvoud is wat je in een
+    // productzoekopdracht wilt, en `deepFind` zou net zo goed "__typename"
+    // kunnen teruggeven, dus dat veld eerst met naam en toenaam.
+    const nameField = item["name"];
     const name =
-      str(item["name"]) ??
+      str(nameField) ??
+      (isRecord(nameField) ? str(nameField["singular"]) ?? str(nameField["plural"]) : null) ??
       str(item["description"]) ??
-      str(deepFind(item["name"], (x) => typeof x === "string"));
+      str(deepFind(nameField, (x) => typeof x === "string"));
     if (!name) continue;
+
     const q = item["quantity"] ?? item["amount"];
+    const quantity = num(isRecord(q) ? (q["amount"] ?? q["value"]) : q);
+    const unit = unitOf(item);
+    // "2 el milde olijfolie" staat er ook als kant-en-klare regel. Ontbreekt de
+    // hoeveelheid of de eenheid in de losse velden, dan is die regel de bron:
+    // zonder eenheid werd van "2 el olijfolie" een naamloze 2 en viel de
+    // omrekening naar grammen terug op een schatting.
+    if (quantity === null || unit === null) {
+      const text = str(item["text"]);
+      if (text) {
+        const parsed = parseIngredientText(text);
+        out.push({
+          name: name.toLowerCase(),
+          quantity: quantity ?? parsed.quantity,
+          unit: unit ?? parsed.unit,
+          productId: productIdFrom(item),
+        });
+        continue;
+      }
+    }
+
     out.push({
       name: name.toLowerCase(),
-      quantity: num(isRecord(q) ? (q["amount"] ?? q["value"]) : q),
-      unit: str(isRecord(item["unit"]) ? item["unit"]["name"] : item["unit"]),
+      quantity,
+      unit,
       productId: productIdFrom(item),
     });
   }
@@ -623,6 +764,19 @@ export function productIdFrom(item: Record<string, unknown>): string | null {
     if (typeof candidate === "string" && /^\d+$/.test(candidate.trim())) return candidate.trim();
   }
   return null;
+}
+
+/**
+ * De eenheid van een receptregel. AH noemt het veld `quantityUnit` en schrijft
+ * het als {singular, plural} ("el"/"el", "stuk"/"stuks"); oudere payloads
+ * gebruikten `unit`, als string of als object met `name`.
+ */
+function unitOf(item: Record<string, unknown>): string | null {
+  const raw = item["quantityUnit"] ?? item["unit"];
+  if (!raw) return null;
+  if (typeof raw === "string") return str(raw);
+  if (!isRecord(raw)) return null;
+  return str(raw["singular"]) ?? str(raw["name"]) ?? str(raw["plural"]);
 }
 
 /**

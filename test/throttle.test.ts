@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AhClient, SubrequestBudgetError, type RawScrape } from "../src/ah/client";
+import { AhClient, SubrequestBudgetError, type RawScrape, resetEndpointState } from "../src/ah/client";
 
 /**
  * ah.nl staat achter Akamai's botbescherming. Uit het scrape-archief van de

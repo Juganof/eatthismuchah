@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AhClient } from "../src/ah/client";
+import { AhClient, resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
 import { calibrateToTotal, lookupIngredientMatch } from "../src/nutrition/resolve";
 import type { ResolvedRecipe } from "../src/ah/types";
@@ -119,6 +119,7 @@ afterEach(() => {
   db?.close();
   db = null;
   vi.unstubAllGlobals();
+  resetEndpointState();
 });
 
 describe("lookupIngredientMatch", () => {
@@ -144,5 +145,49 @@ describe("lookupIngredientMatch", () => {
     await expect(lookupIngredientMatch("kwark", client, store)).rejects.toThrow();
     // Geen negatieve match onthouden voor iets dat gewoon een blokkade was.
     expect(await store.getMatch("kwark")).toBeUndefined();
+  });
+});
+
+describe("terugval op de webshoppagina als de mobiele API dichtzit", () => {
+  it("zoekt via www.ah.nl zodra het anonieme token geweigerd wordt", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        calls.push(url);
+        // Dit is wat de echte app overkwam: het token werd geweigerd, waarna
+        // elke productzoekopdracht faalde en niets meer gekoppeld werd.
+        if (url.includes("/mobile-auth/")) return new Response("Access Denied", { status: 403 });
+        if (url.includes("/producten/zoeken")) {
+          return new Response(
+            '<a href="/producten/product/wi123456/ah-magere-kwark">kwark</a>',
+            { status: 200 },
+          );
+        }
+        if (url.includes("/producten/product/wi")) {
+          return new Response(
+            '<table data-testid="nutrition-table"><tr><td>Energie</td><td>57 kcal</td></tr>' +
+              "<tr><td>Eiwitten</td><td>10 g</td></tr></table>",
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      }),
+    );
+
+    const db = createTestDb();
+    try {
+      const store = new Store(db);
+      const client = new AhClient("test", undefined, { minIntervalMs: 0, maxRetries: 0 });
+      const result = await lookupIngredientMatch("magere kwark", client, store);
+
+      expect(result.outcome).toBe("matched");
+      expect(result.product?.webshopId).toBe("123456");
+      expect(result.product?.per100g.kcal).toBe(57);
+      expect(calls.some((c) => c.includes("/producten/zoeken"))).toBe(true);
+    } finally {
+      db.close();
+    }
   });
 });

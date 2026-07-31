@@ -59,11 +59,22 @@ ingredienten alleen:
   overgenomen zonder één productzoekopdracht, en een eigen berekening overschrijft hem
   nooit (`recipe_nutrition.source`). Genoeg om te plannen is het niet: daarvoor moeten
   de ingrediënten alsnog aan producten gekoppeld zijn.
-* **De productlinks per ingrediënt** — AH's eigen "bestel de ingrediënten"-koppeling,
-  die in de paginastate staat (bij de huidige App Router in de `self.__next_f`-chunks,
-  zie `extractFlightJson`). Staat die erin, dan wordt de voedingswaarde rechtstreeks
-  van dat product gehaald: één aanroep in plaats van zoeken plus scoren, en zonder
-  kans op het verkeerde product.
+* **De paginastate zelf** — bij de huidige App Router staat die in de
+  `self.__next_f`-chunks (zie `extractFlightJson`), en daar is het recept veel rijker
+  dan in de `ld+json`: naam als `{singular, plural}`, `quantityUnit` naast de
+  hoeveelheid, de kant-en-klare regel `"2 el milde olijfolie"` als terugval, en tags
+  met AH's eigen indeling (`menugang: borrelhapje`, `speciale-wensen: vegetarisch`).
+* **Productlinks per ingrediënt** worden gebruikt als ze er zijn — dan komt de
+  voedingswaarde rechtstreeks van dat product, zonder zoeken en zonder kans op het
+  verkeerde product. In de praktijk staan ze *niet* in de receptpagina: de knop "Kies
+  producten" haalt ze apart op. De code pikt ze op zodra ze er wel in staan; tot die
+  tijd zoekt `match.ts` het product er zelf bij.
+
+Voor productzoekopdrachten gebruikt de app de mobiele API, en als die het anonieme
+token weigert (403 op `mobile-auth`, wat in de praktijk gebeurt) valt hij terug op de
+gewone webshoppagina `www.ah.nl/producten/zoeken`. Een 403 of 429 op de zoekopdracht
+zelf is iets anders — dat is Akamai's tempo-blokkade, en die blijft een blokkade in
+plaats van stilletjes "geen product gevonden" te worden.
 
 ## Alleen schone data
 

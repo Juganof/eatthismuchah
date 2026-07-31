@@ -279,3 +279,66 @@ describe("productkoppeling per ingredient", () => {
     expect(productIdFrom({ products: [{ id: 12 }] })).toBe("12");
   });
 });
+
+describe("de paginastate van AH's receptpagina", () => {
+  /** Zoals AH het in de flight-chunks zet; overgenomen uit een echte scrape. */
+  const flightRecipe = {
+    id: 1202571,
+    title: "Vegaballetjes met yoghurtdip",
+    href: "/allerhande/recept/R-R1202571/vegaballetjes",
+    servings: 4,
+    tags: [
+      { __typename: "RecipeTag", key: "speciale-wensen", value: "vegetarisch" },
+      { __typename: "RecipeTag", key: "menugang", value: "borrelhapje" },
+    ],
+    classifications: ["vegetarisch", "zonder vlees/vis"],
+    ingredients: [
+      {
+        __typename: "RecipeIngredient",
+        id: 3200,
+        name: { __typename: "SingularPluralName", singular: "milde olijfolie", plural: null },
+        quantity: 2,
+        quantityUnit: { __typename: "SingularPluralName", singular: "el", plural: "el" },
+        text: "2 el milde olijfolie",
+      },
+      {
+        __typename: "RecipeIngredient",
+        id: 3575,
+        name: { __typename: "SingularPluralName", singular: "pijnboompitten", plural: null },
+        quantity: 15,
+        quantityUnit: { __typename: "SingularPluralName", singular: "g", plural: "g" },
+        text: "15 g pijnboompitten",
+      },
+    ],
+  };
+
+  it("leest naam en eenheid uit de {singular, plural}-velden", () => {
+    const [recipe] = collectRecipes(flightRecipe);
+    expect(recipe?.ingredients).toEqual([
+      { name: "milde olijfolie", quantity: 2, unit: "el", productId: null },
+      { name: "pijnboompitten", quantity: 15, unit: "g", productId: null },
+    ]);
+  });
+
+  it("valt terug op de kant-en-klare regel als de losse velden ontbreken", () => {
+    const [recipe] = collectRecipes({
+      ...flightRecipe,
+      ingredients: [{ name: { singular: "milde olijfolie" }, text: "2 el milde olijfolie" }],
+    });
+    expect(recipe?.ingredients[0]).toEqual({
+      name: "milde olijfolie",
+      quantity: 2,
+      unit: "el",
+      productId: null,
+    });
+  });
+
+  it("neemt AH's eigen labels over uit tags en classifications", () => {
+    const [recipe] = collectRecipes(flightRecipe);
+    // Zonder dit zou het flight-object (dat eerst komt) de ld+json-keywords
+    // verdringen en bleef het recept zonder AH-labels achter.
+    expect(recipe?.keywords).toEqual(
+      expect.arrayContaining(["vegetarisch", "borrelhapje", "zonder vlees", "vis"]),
+    );
+  });
+});

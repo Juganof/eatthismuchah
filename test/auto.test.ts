@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
 import { DEFAULT_AUTO_CONFIG, autoStatus, configFrom, runAutoIngest } from "../src/ingest/auto";
 import { createTestDb, type TestDb } from "./helpers/d1";
@@ -75,6 +76,7 @@ afterEach(() => {
   db?.close();
   db = null;
   vi.unstubAllGlobals();
+  resetEndpointState();
 });
 
 function envFor(): { DB: TestDb; AH_USER_AGENT: string } {

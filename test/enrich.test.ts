@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Store } from "../src/db/queries";
 import { enrichIngredientMatches } from "../src/ingest/pipeline";
-import { AhClient } from "../src/ah/client";
+import { AhClient, resetEndpointState } from "../src/ah/client";
 import { rerollSlot } from "../src/optimize/day";
 import { createTestDb, type TestDb } from "./helpers/d1";
 
@@ -19,6 +19,7 @@ afterEach(() => {
   db?.close();
   db = null;
   vi.unstubAllGlobals();
+  resetEndpointState();
 });
 
 function envFor(): { DB: TestDb; AH_USER_AGENT: string } {

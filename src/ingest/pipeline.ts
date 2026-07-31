@@ -227,13 +227,16 @@ export async function ingestQueries(
         }
         await store.putRecipe(full);
         await computeNutrition(store, client, full);
-        // Diagnose voor de productlinks: hangt AH er zelf producten aan, dan
-        // hoeft de enrichment-ronde straks niets te zoeken. Staat hier steevast
-        // 0, dan zit die koppeling niet (meer) in de pagina.
+        // Alleen melden als AH er zelf producten aan hangt. Uit een echte
+        // scrape bleek dat de receptpagina die koppeling niet bevat (de knop
+        // "Kies producten" haalt hem apart op), dus dit is stil tenzij AH hem
+        // alsnog meelevert — en dan wil je het meteen weten.
         const metLink = full.ingredients.filter((i) => i.productId).length;
-        await store.log("info", "ingest", `${full.title}: ${metLink}/${full.ingredients.length} ingredienten met AH-productlink`, {
-          recept: full.id,
-        });
+        if (metLink > 0) {
+          await store.log("info", "ingest", `${full.title}: ${metLink} ingredienten met AH-productlink`, {
+            recept: full.id,
+          });
+        }
         // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
         if (wantedMoment && momentOf(full) !== wantedMoment) {
           skipped++;

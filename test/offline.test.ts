@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AhClient } from "../src/ah/client";
+import { AhClient, resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
 import { DEFAULT_SLOTS } from "../src/nutrition/split";
 import type { DailyTargets } from "../src/nutrition/targets";
@@ -22,6 +22,7 @@ afterEach(() => {
   db?.close();
   db = null;
   vi.unstubAllGlobals();
+  resetEndpointState();
 });
 
 const daily: DailyTargets = { kcal: 2000, protein: 150, carbs: 200, fat: 60, fiber: 28 };
