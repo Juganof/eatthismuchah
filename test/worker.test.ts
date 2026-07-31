@@ -36,7 +36,6 @@ describe("Worker routes", () => {
       "/api/day/slot",
       "/api/day/reroll",
       "/api/shopping",
-      "/api/enrich",
       "/api/products/search",
       "/api/logs",
       "/api/wipe",
@@ -51,8 +50,7 @@ describe("Worker routes", () => {
     expect(await response.json()).toEqual({
       recipes: 0,
       plannable: 0,
-      onbruikbaar: 0,
-      zonderIngredienten: 0,
+      afgekeurd: 0,
       scrapes: 0,
       unparsed: 0,
     });

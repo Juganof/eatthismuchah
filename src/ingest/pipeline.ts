@@ -1,18 +1,18 @@
 import { AhClient, isBudgetError } from "../ah/client";
-import type { Nutrients, Recipe } from "../ah/types";
+import type { Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
-import {
-  coverageOf,
-  lookupIngredientMatch,
-  lookupLinkedProduct,
-  resolveRecipe,
-} from "../nutrition/resolve";
+import { firstIncomplete, resolveRecipe } from "../nutrition/resolve";
 
 /**
  * Het scrapen zelf, los van de routes. Zowel de knoppen in de UI als de
  * automatische ronde uit `auto.ts` lopen hierlangs, zodat er maar één plek is
  * waar bepaald wordt hoe een recept binnenkomt en wordt weggeschreven.
+ *
+ * Eén regel bepaalt alles hier: een recept wordt in één keer helemaal afgemaakt
+ * of het wordt niet opgeslagen. Geen titels zonder ingredienten, geen
+ * ingredienten zonder voedingswaarde, geen totalen die later nog moeten worden
+ * bijgewerkt. Wat in de database staat, kan de planner gebruiken.
  */
 
 export interface ScrapeEnv {
@@ -24,8 +24,11 @@ export interface ScrapeEnv {
  * Zoektermen per eetmoment. AH's zoekfunctie kent zijn eigen indeling
  * ("menugang": ontbijt, lunch, tussendoortje, hoofdgerecht), maar die filter zit
  * achter een GraphQL-aanroep die we niet kunnen vastpinnen. Zoeken op deze
- * woorden levert dezelfde hoek van de catalogus op, en de controle achteraf
- * gebeurt op AH's eigen labels — zie `momentOf`.
+ * woorden levert dezelfde hoek van de catalogus op.
+ *
+ * Wat een recept uiteindelijk ís, bepaalt AH's eigen label (zie `deriveTags`) en
+ * niet de zoekterm waarmee we het vonden: een recept dat AH als lunch labelt is
+ * ook bruikbaar als de ontbijtronde het tegenkwam.
  */
 export const MOMENT_QUERIES: Record<string, string[]> = {
   ontbijt: ["ontbijt", "havermout", "kwark ontbijt", "smoothie", "pannenkoeken", "yoghurt"],
@@ -71,7 +74,11 @@ export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptio
   return new AhClient(
     env.AH_USER_AGENT,
     (raw) => {
-      void store.putRaw(raw);
+      // Alleen receptpagina's het archief in. Productpagina's zijn 500-700 kB per
+      // stuk en we bewaren er toch alleen de voedingswaarde uit; recept-HTML is
+      // waarmee parserfouten te vinden en te repareren zijn.
+      if (raw.kind === "recipe" || raw.kind === "recipe_search") void store.putRaw(raw);
+
       // Eén keer vaststellen dat dit endpoint dood is, en dat onthouden over
       // rondes heen: anders kost het elke twee minuten opnieuw een verzoek uit
       // een budget van veertig, én is het een tweede verzoek binnen een seconde
@@ -80,8 +87,7 @@ export function scrapeClient(env: ScrapeEnv, store: Store, options?: ClientOptio
         void store.setState(RECIPE_JSON_DEAD, "1");
       }
       // Elk verzoek aan ah.nl ook als logregel: de statuscode per verzoek is
-      // precies wat je wilt zien als er niets binnenkomt, en het archief is
-      // daar te log voor — daar staat de hele payload in.
+      // precies wat je wilt zien als er niets binnenkomt.
       void store.log(raw.status >= 400 ? "warn" : "info", "ah", `${raw.kind} ${raw.ref} -> ${raw.status}`, {
         url: raw.url,
         bytes: raw.body.length,
@@ -101,100 +107,106 @@ export function isBlocked(error: unknown): boolean {
   return / -> (403|429)$/.test(message);
 }
 
-/**
- * Bewaart de voedingswaarde die AH zelf bij het recept vermeldt. Dat scheelt een
- * productzoekopdracht per ingredient én is nauwkeuriger, dus dit is het pad dat
- * we het liefst nemen. AH geeft de waarden per portie; de rest van de app rekent
- * met het hele recept.
- */
-export async function storeAhNutrition(store: Store, recipe: Recipe): Promise<boolean> {
-  const perServing = recipe.nutritionPerServing;
-  if (!perServing) return false;
-
-  const servings = recipe.servings > 0 ? recipe.servings : 1;
-  const total: Nutrients = {};
-  for (const [key, value] of Object.entries(perServing)) {
-    total[key as keyof Nutrients] = value * servings;
-  }
-  // Coverage 1: dit komt van de bron zelf, daar valt niets aan te schatten.
-  await store.putNutrition(recipe.id, total, 1, "ah");
-  return true;
-}
-
-/**
- * Voedingswaarde vastleggen: die van AH als die er is, anders opgeteld uit de
- * producten die we al kennen.
- *
- * Dit raakt bewust het netwerk niet. Eerder zocht dit per ongematcht ingredient
- * een product op, en dat is precies wat de ronde opblies: een recept met vijftien
- * ingredienten kostte dan dertig verzoeken, en Cloudflare kapte de hele aanroep
- * af met "Too many subrequests" — waarna élk volgend recept in die ronde faalde.
- * Ingesten kost nu één verzoek per recept; het koppelen van ingredienten aan
- * producten is werk voor `enrichIngredientMatches`, met zijn eigen budget en
- * eigen tempo, en `recomputeNutrition` telt het daarna alsnog op.
- */
-export async function computeNutrition(
-  store: Store,
-  client: AhClient,
-  recipe: Recipe,
-): Promise<void> {
-  if (await storeAhNutrition(store, recipe)) return;
-  const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
-  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
-}
-
-/**
- * Telt recepttotalen opnieuw op uit de inmiddels bekende producten — puur uit de
- * database, zonder één verzoek aan ah.nl.
- *
- * Zonder deze stap blijft een recept op de dekking staan die het bij binnenkomst
- * had (meestal nul, want toen was er nog niets gekoppeld), ook nadat de
- * enrichment-ronde al zijn ingredienten heeft gevonden. AH's eigen cijfers
- * blijven staan: `putNutrition` laat een 'ah'-bron niet overschrijven.
- */
-export async function recomputeNutrition(env: ScrapeEnv, limit: number): Promise<number> {
-  const store = new Store(env.DB);
-  const ids = await store.recipesNeedingRecompute(limit);
-  if (ids.length === 0) return 0;
-
-  // Geen netwerk, dus een client zonder budget is hier veilig; `cacheOnly` zorgt
-  // dat hij nooit gebruikt wordt.
-  const client = scrapeClient(env, store);
-  let updated = 0;
-  for (const id of ids) {
-    const recipe = await store.getRecipe(id);
-    if (!recipe) continue;
-    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
-    const coverage = coverageOf(resolved);
-    if (coverage <= 0) continue;
-    await store.putNutrition(id, resolved.total, coverage);
-    updated++;
-  }
-  if (updated > 0) {
-    await store.log("info", "ingest", `${updated} recepten opnieuw doorgerekend uit bekende producten`);
-  }
-  return updated;
-}
-
 export interface IngestResult {
+  /** Recepten die compleet binnenkwamen en zijn opgeslagen. */
   added: number;
-  /** Opgehaald en bewaard, maar niet van het gevraagde eetmoment. */
-  skipped: number;
+  /** Recepten die niet compleet te krijgen waren; die komen nooit meer terug. */
+  rejected: number;
   /** Hoe vaak AH ons afknijpte; hierop wordt het tempo bijgesteld. */
   blocked: number;
   errors: string[];
 }
 
+/** Wat er met één recept gebeurde. */
+export type CompleteOutcome = "opgeslagen" | "afgekeurd" | "overgeslagen";
+
 /**
- * `wantedMoment` maakt van een brede zoekopdracht een gerichte: alles wordt
- * opgehaald en bewaard (weggooien van een scrape doen we nooit), maar alleen wat
- * AH als dat moment labelt telt mee voor de limiet.
+ * Maakt één recept helemaal af, of keurt het af.
+ *
+ * Dit is de enige plek waar een recept de database in gaat, en de regel is
+ * overal dezelfde: elk ingredient heeft een AH-product met echte voedingswaarde
+ * per 100 g, of hoort nul te zijn (water, zout — zie `isNutritionFree`). Recept
+ * en totaal gaan samen naar binnen; een van de twee zonder de ander is precies
+ * het halffabricaat dat we niet meer willen.
+ *
+ * `cacheOnly` doet hetzelfde zonder één verzoek aan ah.nl — dat is wat
+ * /api/reparse gebruikt: alleen recepten waarvan we alle producten al kennen.
  */
-export async function ingestQueries(
+export async function completeRecipe(
+  store: Store,
+  client: AhClient,
+  recipe: Recipe,
+  options: { cacheOnly?: boolean } = {},
+): Promise<CompleteOutcome> {
+  if (recipe.ingredients.length === 0) {
+    await store.skipRecipe(recipe.id, "geen ingredientenlijst op de pagina");
+    return "afgekeurd";
+  }
+
+  const resolved = await resolveRecipe(recipe, client, store, options);
+  const missing = firstIncomplete(resolved);
+  if (missing) {
+    // Zonder netwerk is "niet compleet" geen oordeel over het recept maar over
+    // wat we toevallig in de cache hebben; dan niets vastleggen.
+    if (options.cacheOnly) return "overgeslagen";
+    await store.skipRecipe(recipe.id, `geen product voor "${missing}"`);
+    await store.log("info", "ingest", `${recipe.title} afgekeurd`, {
+      recept: recipe.id,
+      ingredient: missing,
+    });
+    return "afgekeurd";
+  }
+
+  await store.putRecipe(recipe);
+  await store.putNutrition(recipe.id, resolved.total, 1);
+  await store.log("info", "ingest", `${recipe.title} opgeslagen`, {
+    recept: recipe.id,
+    ingredienten: recipe.ingredients.length,
+    kcal: Math.round(resolved.total.kcal ?? 0),
+  });
+  return "opgeslagen";
+}
+
+/**
+ * Haalt losse recepten op en maakt ze af. Hier hangt /api/search aan: wat je
+ * zoekt wordt op de achtergrond compleet gemaakt, of het komt er niet in.
+ */
+export async function completeRecipeIds(
+  env: ScrapeEnv,
+  ids: string[],
+  clientOptions?: ClientOptions,
+): Promise<void> {
+  const store = new Store(env.DB);
+  const client = scrapeClient(env, store, clientOptions);
+
+  for (const id of ids) {
+    if (client.budget.max - client.budget.used < 4) break;
+    try {
+      if (await store.isKnownRecipe(id)) continue;
+      const recipe = await client.getRecipe(id);
+      if (recipe) await completeRecipe(store, client, recipe);
+    } catch {
+      // volgende recept; dit draait buiten het antwoord om
+    }
+  }
+}
+
+/**
+ * Eén ronde: zoeken, en elk gevonden recept helemaal afmaken.
+ *
+ * "Helemaal afmaken" betekent: elk ingredient heeft een AH-product met echte
+ * voedingswaarde per 100 g, of hoort nul te zijn (water, zout — zie
+ * `isNutritionFree`). Lukt dat, dan gaan recept én totaal in één keer de
+ * database in. Lukt het niet, dan komt het recept in `skipped_recipes` en wordt
+ * het nooit opnieuw opgehaald.
+ *
+ * Raakt het verzoekbudget op midden in een recept, dan gebeurt er niets: niet
+ * opslaan, niet afkeuren. Dat is het verschil tussen "past nu niet" en "kan niet".
+ */
+export async function ingestComplete(
   env: ScrapeEnv,
   queries: string[],
   limit: number,
-  wantedMoment?: string,
   clientOptions?: ClientOptions,
 ): Promise<IngestResult> {
   const store = new Store(env.DB);
@@ -202,231 +214,63 @@ export async function ingestQueries(
     ...clientOptions,
     skipRecipeJsonSearch: (await store.getState(RECIPE_JSON_DEAD)) === "1",
   });
-  const perQuery = Math.max(1, Math.ceil(limit / Math.max(1, queries.length)));
 
   let added = 0;
-  let skipped = 0;
+  let rejected = 0;
   let blocked = 0;
   const errors: string[] = [];
 
+  // Vier verzoeken over is het minimum om een recept nog te kúnnen afmaken: de
+  // pagina zelf plus één onbekend ingredient.
+  const budgetLeft = () => client.budget.max - client.budget.used;
+
   for (const query of queries) {
-    if (client.budget.max - client.budget.used < 2) break;
+    if (budgetLeft() < 4 || added >= limit) break;
+
     let found: Recipe[];
     try {
-      found = await client.searchRecipes(query, perQuery);
+      found = await client.searchRecipes(query, Math.max(limit, 10));
     } catch (err) {
       if (isBudgetError(err)) break;
       if (isBlocked(err)) blocked++;
       const message = err instanceof Error ? err.message : String(err);
-      errors.push(`search "${query}": ${message}`);
+      errors.push(`zoeken "${query}": ${message}`);
       await store.log("error", "ingest", `zoeken op "${query}" mislukt`, { fout: message });
       continue;
     }
 
-    // Zoekresultaten dragen geen ingredienten, maar wel titel en id. Die eerst
-    // wegschrijven: valt het ophalen van de detailpagina daarna om, dan weten we
-    // in elk geval nog dat dit recept bestaat.
     for (const stub of found) {
-      try {
-        await store.putRecipe(stub);
-      } catch (err) {
-        errors.push(`opslaan ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+      if (budgetLeft() < 4 || added >= limit) break;
+      // Al bekend of al afgekeurd: kost geen enkel verzoek om over te slaan.
+      if (await store.isKnownRecipe(stub.id)) continue;
 
-    for (const stub of found) {
-      if (added >= limit) break;
       try {
-        // Onder de twee verzoeken over: stoppen vóór Cloudflare ons afkapt, want
-        // dan verliezen we ook het wegschrijven van wat we al hadden.
-        if (client.budget.max - client.budget.used < 2) break;
-        const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
-        if (!full || full.ingredients.length === 0) {
-          await store.log("warn", "ingest", `${stub.id} kwam zonder ingredienten binnen`, {
-            titel: stub.title,
-          });
+        const recipe = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
+        if (!recipe) {
+          await store.skipRecipe(stub.id, "receptpagina gaf geen recept");
+          rejected++;
           continue;
         }
-        await store.putRecipe(full);
-        await computeNutrition(store, client, full);
-        // Alleen melden als AH er zelf producten aan hangt. Uit een echte
-        // scrape bleek dat de receptpagina die koppeling niet bevat (de knop
-        // "Kies producten" haalt hem apart op), dus dit is stil tenzij AH hem
-        // alsnog meelevert — en dan wil je het meteen weten.
-        const metLink = full.ingredients.filter((i) => i.productId).length;
-        if (metLink > 0) {
-          await store.log("info", "ingest", `${full.title}: ${metLink} ingredienten met AH-productlink`, {
-            recept: full.id,
-          });
-        }
-        // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
-        if (wantedMoment && momentOf(full) !== wantedMoment) {
-          skipped++;
-          continue;
-        }
-        added++;
+
+        const outcome = await completeRecipe(store, client, recipe);
+        if (outcome === "opgeslagen") added++;
+        else if (outcome === "afgekeurd") rejected++;
       } catch (err) {
-        if (isBudgetError(err)) {
-          await store.log("info", "ingest", "verzoekbudget op; ronde stopt hier");
-          break;
-        }
+        // Budget op: niets vastleggen. Volgende ronde begint dit recept opnieuw.
+        if (isBudgetError(err)) break;
         if (isBlocked(err)) blocked++;
         const message = err instanceof Error ? err.message : String(err);
-        errors.push(`recipe ${stub.id}: ${message}`);
+        errors.push(`${stub.id}: ${message}`);
         await store.log("error", "ingest", `recept ${stub.id} mislukt`, { fout: message });
       }
     }
-    if (added >= limit) break;
   }
 
   await store.log(
     blocked > 0 ? "warn" : "info",
     "ingest",
-    `${added} recepten toegevoegd voor ${wantedMoment ?? "alles"}`,
-    {
-      queries,
-      skipped,
-      blocked,
-      fouten: errors.length,
-      verzoeken: `${client.budget.used}/${client.budget.max}`,
-    },
+    `${added} recepten opgeslagen, ${rejected} afgekeurd`,
+    { queries, blocked, fouten: errors.length, verzoeken: `${client.budget.used}/${client.budget.max}` },
   );
-  return { added, skipped, blocked, errors };
-}
-
-export interface RepairResult {
-  examined: number;
-  repaired: number;
-  blocked: number;
-  errors: string[];
-}
-
-/**
- * Haalt recepten op die alleen als titel bestaan. Dat zijn er meestal een hoop:
- * een zoekopdracht levert alleen titels, en als AH's botbescherming daarna de
- * detailpagina blokkeert, blijft het recept leeg staan.
- */
-export async function repairEmptyRecipes(
-  env: ScrapeEnv,
-  limit: number,
-  clientOptions?: ClientOptions,
-): Promise<RepairResult> {
-  const store = new Store(env.DB);
-  const ids = await store.recipesWithoutIngredients(limit);
-  if (ids.length === 0) return { examined: 0, repaired: 0, blocked: 0, errors: [] };
-
-  const client = scrapeClient(env, store, clientOptions);
-  let repaired = 0;
-  let blocked = 0;
-  const errors: string[] = [];
-
-  for (const id of ids) {
-    if (client.budget.max - client.budget.used < 2) break;
-    try {
-      const recipe = await client.getRecipe(id);
-      if (!recipe || recipe.ingredients.length === 0) {
-        errors.push(`${id}: nog steeds geen ingredienten`);
-        await store.markRepairAttempt(id);
-        await store.log("warn", "repair", `${id} heeft nog steeds geen ingredienten`);
-        continue;
-      }
-      await store.putRecipe(recipe);
-      await computeNutrition(store, client, recipe);
-      repaired++;
-    } catch (err) {
-      if (isBudgetError(err)) break;
-      if (isBlocked(err)) blocked++;
-      // Achteraan in de rij: anders probeert de volgende ronde exact dit recept
-      // weer als eerste, en komt de rest nooit aan de beurt.
-      await store.markRepairAttempt(id);
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push(`${id}: ${message}`);
-      await store.log("error", "repair", `${id} aanvullen mislukt`, { fout: message });
-    }
-  }
-
-  await store.log("info", "repair", `${repaired} van ${ids.length} lege recepten aangevuld`, {
-    blocked,
-  });
-  return { examined: ids.length, repaired, blocked, errors };
-}
-
-export interface EnrichResult {
-  /** Namen geprobeerd. */
-  examined: number;
-  /** Aan een product gekoppeld. */
-  matched: number;
-  /** Gezocht, maar niets bruikbaars gevonden — ook een resultaat, wordt onthouden. */
-  unmatched: number;
-  blocked: number;
-  errors: string[];
-}
-
-/**
- * Vult ingredient -> product koppelingen aan voor namen die nog nooit opgezocht
- * zijn. Dit is bewust GEEN onderdeel van het binnenhalen van een recept
- * (`computeNutrition` hierboven): daar nemen we AH's eigen voedingswaarde over
- * en doen we nul productzoekopdrachten. Zonder deze aparte, lager-prioriteit
- * ronde blijft `ingredient_matches` voor bijna elk recept leeg, en kan de
- * planner dus nooit "meer kwark, minder granola". Erger nog: zonder koppelingen
- * komt zo'n recept helemaal niet in een dagmenu, want `planFor` in
- * `src/optimize/day.ts` slaat alles over waarvan de voedingswaarde niet per
- * ingredient bekend is.
- */
-export async function enrichIngredientMatches(
-  env: ScrapeEnv,
-  limit: number,
-  clientOptions?: ClientOptions,
-): Promise<EnrichResult> {
-  const store = new Store(env.DB);
-  const names = await store.ingredientNamesWithoutMatch(limit);
-  if (names.length === 0) return { examined: 0, matched: 0, unmatched: 0, blocked: 0, errors: [] };
-
-  const client = scrapeClient(env, store, clientOptions);
-  let matched = 0;
-  let unmatched = 0;
-  let blocked = 0;
-  const errors: string[] = [];
-
-  for (const { name, productId } of names) {
-    if (client.budget.max - client.budget.used < 3) break;
-    try {
-      // Heeft AH bij het recept zelf al een product aangewezen, dan is dat het:
-      // één detailaanroep in plaats van zoeken plus raden, en zonder foutmarge.
-      if (productId) {
-        const linked = await lookupLinkedProduct(name, productId, client, store);
-        if (linked) {
-          matched++;
-          await store.log("info", "enrich", `"${name}" via AH's eigen productlink`, {
-            product: linked.title,
-            webshopId: linked.webshopId,
-          });
-          continue;
-        }
-      }
-      const { outcome, product, score } = await lookupIngredientMatch(name, client, store);
-      if (outcome === "matched") {
-        matched++;
-        await store.log("info", "enrich", `"${name}" gekoppeld aan "${product?.title}"`, {
-          webshopId: product?.webshopId,
-          score,
-        });
-      } else {
-        unmatched++;
-        await store.log("warn", "enrich", `"${name}" leverde geen bruikbaar product op`);
-      }
-    } catch (err) {
-      if (isBudgetError(err)) break;
-      if (isBlocked(err)) blocked++;
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push(`${name}: ${message}`);
-      await store.log("error", "enrich", `"${name}" opzoeken mislukt`, { fout: message });
-    }
-  }
-
-  await store.log("info", "enrich", `${matched} gekoppeld, ${unmatched} zonder product`, {
-    verzoeken: `${client.budget.used}/${client.budget.max}`,
-    blocked,
-  });
-  return { examined: names.length, matched, unmatched, blocked, errors };
+  return { added, rejected, blocked, errors };
 }

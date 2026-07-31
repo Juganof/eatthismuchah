@@ -202,5 +202,15 @@ CREATE TABLE IF NOT EXISTS app_logs (
   detail  TEXT                     -- vrije context als JSON
 );
 
+-- Recepten die niet compleet te krijgen waren: een ingredient zonder bruikbaar
+-- AH-product. Ze staan hier zodat we ze nooit opnieuw ophalen.
+CREATE TABLE IF NOT EXISTS skipped_recipes (
+  id     TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  at     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skipped_recipes_at ON skipped_recipes(at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_app_logs_at ON app_logs(at DESC);
 CREATE INDEX IF NOT EXISTS idx_app_logs_level ON app_logs(level, at DESC);

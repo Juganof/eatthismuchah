@@ -1,13 +1,5 @@
 import { Store } from "../db/queries";
-import {
-  MOMENTS,
-  MOMENT_QUERIES,
-  enrichIngredientMatches,
-  ingestQueries,
-  recomputeNutrition,
-  repairEmptyRecipes,
-  type ScrapeEnv,
-} from "./pipeline";
+import { MOMENTS, MOMENT_QUERIES, ingestComplete, type ScrapeEnv } from "./pipeline";
 
 /**
  * Vult de database de hele dag door zichzelf aan, in kleine porties.
@@ -17,13 +9,10 @@ import {
  * loopt gegarandeerd tegen 403's aan. Veel kleine rondes met rust ertussen komen
  * er wél door, en leveren over een dag genomen veel meer recepten op.
  *
- * Elke ronde doet één ding:
- *   1. staan er lege recepten? die eerst — een titel zonder ingredienten is
- *      waardeloos voor de planner, en het aanvullen kost één pagina per recept;
- *   2. is er nog niets plánbaar, of is het de beurt van de koppelronde, dan
- *      ingredienten aan producten koppelen: zonder die koppelingen kan de
- *      planner met geen enkel recept iets, dus meer ophalen heeft dan geen zin;
- *   3. anders: nieuwe recepten voor het eetmoment dat aan de beurt is.
+ * Elke ronde doet hetzelfde: zoeken op de term die aan de beurt is, en elk
+ * gevonden recept helemaal afmaken — inclusief de voedingswaarde van elk
+ * ingredient. Wat niet compleet te krijgen is, wordt afgekeurd en nooit meer
+ * opgehaald. Er zijn dus geen halffabricaten om later te repareren.
  *
  * Verder houdt hij zich in: een dagbudget zodat we niet eindeloos blijven
  * hameren, en een afkoelperiode zodra AH ons alsnog blokkeert.
@@ -33,7 +22,6 @@ import {
 const CURSOR = "auto:cursor";
 const COOLDOWN_UNTIL = "auto:cooldown_until";
 const BLOCK_STREAK = "auto:block_streak";
-const ENRICH_TURN = "auto:enrich_turn";
 const PAUSED = "auto:paused";
 
 export interface AutoConfig {
@@ -54,17 +42,6 @@ export interface AutoConfig {
   maxCooldownMs: number;
   /** Wachttijd voor de eerste herkansing binnen een ronde; verdubbelt daarna. */
   backoffMs: number;
-  /** Ingredientnamen per enrichment-ronde. */
-  enrichBatch: number;
-  /**
-   * Hoe lang een recept de tijd krijgt om bruikbaar te worden voordat het wordt
-   * opgeruimd. Een net binnengehaald recept heeft de herstel- en koppelrondes nog
-   * niet gehad; pas daarna is "geen ingredienten of geen echte voedingswaarde"
-   * ook echt een eindstand.
-   */
-  purgeGraceMs: number;
-  /** Hoeveel onbruikbare recepten er per ronde weggaan. */
-  purgeBatch: number;
   /** Hoeveel logregels er bewaard blijven; oudere gaan elke ronde weg. */
   logKeep: number;
   /**
@@ -74,8 +51,6 @@ export interface AutoConfig {
    * subrequests". Onder de grens blijven is de enige manier om dat te vermijden.
    */
   maxRequests: number;
-  /** Recepten die per ronde opnieuw doorgerekend worden; kost geen verzoeken. */
-  recomputeBatch: number;
   /**
    * Vanaf hoeveel opeenvolgende rondes mét blokkade we ons gedeisd houden. Eén
    * enkele 403 zegt niets over het tempo — dat is vaak gewoon een recept dat
@@ -83,13 +58,6 @@ export interface AutoConfig {
    * veel meer dan het oplevert. Twee rondes op rij is een ander verhaal.
    */
   cooldownAfterBlocks: number;
-  /**
-   * Eén op de zoveel niet-repareer-rondes gaat naar ingredient-koppelingen in
-   * plaats van nieuwe recepten. Een vaste plek (bv. altijd laatste prioriteit)
-   * zou enrichment nooit laten draaien, want de eetmoment-rotatie heeft altijd
-   * werk; een vast aandeel laat de dekking wel geleidelijk verbeteren.
-   */
-  enrichEvery: number;
 }
 
 export const DEFAULT_AUTO_CONFIG: AutoConfig = {
@@ -102,13 +70,8 @@ export const DEFAULT_AUTO_CONFIG: AutoConfig = {
   // herkansen na 1,5 en 3 seconden liep gegarandeerd tegen dezelfde muur. Op de
   // cron mag dat wachten — daar kijkt niemand naar, en het scheelt een ronde.
   backoffMs: 8000,
-  enrichBatch: 6,
-  enrichEvery: 3,
-  purgeGraceMs: 24 * 60 * 60 * 1000,
-  purgeBatch: 200,
   logKeep: 2000,
   maxRequests: 40,
-  recomputeBatch: 50,
   cooldownAfterBlocks: 2,
 };
 
@@ -116,15 +79,12 @@ export interface AutoResult {
   ran: boolean;
   /** Waarom er niets gebeurde, als er niets gebeurde. */
   reason?: string;
-  mode?: "repair" | "moment" | "enrich";
-  /** Recepten die deze ronde zijn weggegooid omdat er niets bruikbaars in stond. */
-  purged?: number;
-  /** Recepten waarvan het totaal opnieuw is opgeteld uit inmiddels bekende producten. */
-  recomputed?: number;
+  /** Welke zoekterm deze ronde aan de beurt was. */
   detail?: string;
+  /** Complete recepten die zijn opgeslagen. */
   added?: number;
-  repaired?: number;
-  enriched?: number;
+  /** Recepten die niet compleet te krijgen waren; die komen nooit meer terug. */
+  rejected?: number;
   blocked?: number;
   /** Tot wanneer we ons gedeisd houden, als AH ons net geblokkeerd heeft. */
   cooldownUntil?: number;
@@ -144,13 +104,8 @@ export function configFrom(env: Record<string, unknown>): AutoConfig {
     cooldownMs: read("AUTO_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.cooldownMs),
     maxCooldownMs: read("AUTO_MAX_COOLDOWN_MS", DEFAULT_AUTO_CONFIG.maxCooldownMs),
     backoffMs: read("AUTO_BACKOFF_MS", DEFAULT_AUTO_CONFIG.backoffMs),
-    enrichBatch: read("AUTO_ENRICH_BATCH", DEFAULT_AUTO_CONFIG.enrichBatch),
-    enrichEvery: read("AUTO_ENRICH_EVERY", DEFAULT_AUTO_CONFIG.enrichEvery),
-    purgeGraceMs: read("AUTO_PURGE_GRACE_MS", DEFAULT_AUTO_CONFIG.purgeGraceMs),
-    purgeBatch: read("AUTO_PURGE_BATCH", DEFAULT_AUTO_CONFIG.purgeBatch),
     logKeep: read("AUTO_LOG_KEEP", DEFAULT_AUTO_CONFIG.logKeep),
     maxRequests: read("AUTO_MAX_REQUESTS", DEFAULT_AUTO_CONFIG.maxRequests),
-    recomputeBatch: read("AUTO_RECOMPUTE_BATCH", DEFAULT_AUTO_CONFIG.recomputeBatch),
     cooldownAfterBlocks: read("AUTO_COOLDOWN_AFTER_BLOCKS", DEFAULT_AUTO_CONFIG.cooldownAfterBlocks),
   };
 }
@@ -191,83 +146,12 @@ export async function runAutoIngest(
     }
   }
 
-  // Opruimen eerst, en elke ronde: het kost geen enkel verzoek aan ah.nl en
-  // houdt alles wat daarna komt (herstellen, koppelen, plannen) aan het werk op
-  // recepten waar echt iets in zit. Zie `purgeUnusableRecipes` voor wat er weg
-  // mag — favorieten en opgeslagen dagen blijven altijd staan.
-  const purged = await store.purgeUnusableRecipes(config.purgeGraceMs, config.purgeBatch);
-  if (purged > 0) {
-    await store.log("info", "auto", `${purged} onbruikbare recepten opgeruimd`, {
-      respijtUren: Math.round(config.purgeGraceMs / 3600000),
-    });
-  }
   // De log begrensd houden, anders groeit hij oneindig door in een database
   // waar verder alles een bovengrens heeft.
   await store.trimLogs(config.logKeep);
-
-  // Opnieuw doorrekenen wat inmiddels gekoppeld is. Puur database, dus dit hoort
-  // net als het opruimen vóór het netwerkwerk: het maakt recepten bruikbaar
-  // zonder één verzoek aan ah.nl.
-  const recomputed = await recomputeNutrition(env, config.recomputeBatch);
-
-  const clientOptions = {
-    minIntervalMs: config.minIntervalMs,
-    backoffMs: config.backoffMs,
-    maxRequests: config.maxRequests,
-  };
-  // Lege recepten eerst: die kosten één pagina en leveren meteen een bruikbaar
-  // recept op, terwijl nieuw zoeken pas na de detailpagina iets oplevert.
-  const empty = await store.countWithoutIngredients();
-
-  if (empty > 0) {
-    await store.log("info", "auto", `ronde: ${empty} lege recepten aanvullen`);
-    const runId = await store.startRun("repair", `${empty} open`);
-    const result = await repairEmptyRecipes(env, config.batch, clientOptions);
-    await store.finishRun(runId, { repaired: result.repaired, blocked: result.blocked, errors: result.errors });
-    const cooldownUntil = await applyCooldown(store, result.blocked, config, now);
-    return {
-      ran: true,
-      mode: "repair",
-      purged,
-      recomputed,
-      detail: `${empty} lege recepten open`,
-      repaired: result.repaired,
-      blocked: result.blocked,
-      ...(cooldownUntil ? { cooldownUntil } : {}),
-    };
-  }
-
-  // Eén op de `enrichEvery` niet-repareer-rondes gaat naar ingredient-koppelingen
-  // in plaats van nieuwe recepten — zie EnrichConfig hierboven voor waarom dit
-  // een vast aandeel is en geen vaste, nooit-bereikte laatste prioriteit.
-  const enrichTurn = Number((await store.getState(ENRICH_TURN)) ?? 0);
-  await store.setState(ENRICH_TURN, String((enrichTurn + 1) % config.enrichEvery));
-
-  // Zolang er geen enkel recept plambaar is, heeft méér recepten ophalen geen
-  // zin: zonder gekoppelde ingredienten kan de planner er toch niets mee. Dan
-  // gaat elke ronde naar koppelen, niet één op de drie.
-  const niksPlanbaar = (await store.countPlannable()) === 0;
-
-  if (enrichTurn === 0 || niksPlanbaar) {
-    const openNames = await store.countIngredientNamesWithoutMatch();
-    if (openNames > 0) {
-      await store.log("info", "auto", `ronde: ${openNames} ingredient-koppelingen open`);
-      const runId = await store.startRun("enrich", `${openNames} koppelingen open`);
-      const result = await enrichIngredientMatches(env, config.enrichBatch, clientOptions);
-      await store.finishRun(runId, { repaired: result.matched, blocked: result.blocked, errors: result.errors });
-      const cooldownUntil = await applyCooldown(store, result.blocked, config, now);
-      return {
-        ran: true,
-        mode: "enrich",
-        purged,
-        recomputed,
-        detail: `${openNames} koppelingen open`,
-        enriched: result.matched,
-        blocked: result.blocked,
-        ...(cooldownUntil ? { cooldownUntil } : {}),
-      };
-    }
-  }
+  // Eenmalig: alles wat nog uit de tijd van halffabricaten stamt eruit. Zie
+  // `dropIncompleteRecipes`.
+  await cleanupOnce(store);
 
   // Rouleren over de eetmomenten, en binnen een moment over de zoektermen, zodat
   // de database over de dag gelijkmatig alle hoeken raakt in plaats van vijftig
@@ -278,22 +162,47 @@ export async function runAutoIngest(
   const query = queries[Math.floor(cursor / MOMENTS.length) % queries.length]!;
   await store.setState(CURSOR, String((cursor + 1) % (MOMENTS.length * queries.length)));
 
-  await store.log("info", "auto", `ronde: nieuwe recepten voor ${moment}`, { query });
-  const runId = await store.startRun("moment", `${moment}: ${query}`);
-  const result = await ingestQueries(env, [query], config.batch, moment, clientOptions);
-  await store.finishRun(runId, { added: result.added, blocked: result.blocked, errors: result.errors });
+  await store.log("info", "auto", `ronde: ${query}`);
+  const runId = await store.startRun("scrape", `${moment}: ${query}`);
+  const result = await ingestComplete(env, [query], config.batch, {
+    minIntervalMs: config.minIntervalMs,
+    backoffMs: config.backoffMs,
+    maxRequests: config.maxRequests,
+  });
+  await store.finishRun(runId, {
+    added: result.added,
+    repaired: result.rejected,
+    blocked: result.blocked,
+    errors: result.errors,
+  });
   const cooldownUntil = await applyCooldown(store, result.blocked, config, now);
 
   return {
     ran: true,
-    mode: "moment",
-    purged,
-    recomputed,
     detail: `${moment}: ${query}`,
     added: result.added,
+    rejected: result.rejected,
     blocked: result.blocked,
     ...(cooldownUntil ? { cooldownUntil } : {}),
   };
+}
+
+/** app_state-sleutel voor de eenmalige opruiming; zie `cleanupOnce`. */
+const CLEANUP_DONE = "cleanup:complete_only";
+
+/**
+ * Ruimt één keer op wat uit de vorige opzet is blijven staan: recepten zonder
+ * ingredienten of zonder doorgerekende voedingswaarde. Vanaf nu kan zoiets niet
+ * meer ontstaan — een recept gaat compleet de database in of helemaal niet — dus
+ * dit hoeft precies één keer te gebeuren en daarna nooit meer.
+ */
+async function cleanupOnce(store: Store): Promise<void> {
+  if ((await store.getState(CLEANUP_DONE)) === "1") return;
+  const removed = await store.dropIncompleteRecipes();
+  await store.setState(CLEANUP_DONE, "1");
+  if (removed > 0) {
+    await store.log("info", "auto", `${removed} onvolledige recepten uit de oude opzet verwijderd`);
+  }
 }
 
 /**
@@ -357,9 +266,8 @@ export async function autoStatus(env: ScrapeEnv, config: AutoConfig = DEFAULT_AU
   return {
     vandaag: today,
     dagbudget: config.dailyMax,
-    openLegeRecepten: await store.countWithoutIngredients(),
-    onbruikbareRecepten: await store.countUnusableRecipes(config.purgeGraceMs),
-    openKoppelingen: await store.countIngredientNamesWithoutMatch(),
+    recepten: await store.countRecipes(),
+    afgekeurd: await store.countSkippedRecipes(),
     gepauzeerd: (await store.getState(PAUSED)) === "1",
     afkoelenTot: cooldownUntil > Date.now() ? cooldownUntil : null,
     blokkadesOpEenRij: Number((await store.getState(BLOCK_STREAK)) ?? 0),

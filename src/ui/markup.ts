@@ -135,9 +135,9 @@ export function browseTab(): string {
 <section class="panel" id="panel-database" hidden>
   <div class="card">
     <h2>Automatisch bijvullen</h2>
-    <p class="muted">De database vult zichzelf elk kwartier een beetje aan, in het
-    tempo dat ah.nl toestaat. Lege recepten worden eerst afgemaakt, daarna komen
-    de eetmomenten om de beurt aan bod.</p>
+    <p class="muted">De scraper draait vanzelf, in het tempo dat ah.nl toestaat.
+    Elk recept wordt in één keer helemaal afgemaakt &mdash; inclusief de
+    voedingswaarde van elk ingrediënt &mdash; of het komt er niet in.</p>
     <div id="autoStatus"></div>
     <div class="actions">
       <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
@@ -202,14 +202,11 @@ export function adminCard(): string {
       </div>
       <div class="actions">
         <button class="secondary small" id="ingest">Alles door elkaar ophalen</button>
-        <button class="secondary small" id="repair">Ontbrekende ingredi&euml;nten ophalen</button>
-        <button class="secondary small" id="enrich">Ingredi&euml;nt-koppelingen aanvullen</button>
-        <button class="secondary small" id="purge">Onbruikbare recepten opruimen</button>
         <button class="secondary small" id="reparse">Archief opnieuw parsen</button>
         <button class="secondary small" id="probe">AH-verbinding testen</button>
       </div>
-      <p class="muted">Opnieuw beginnen: dit gooit alle gescrapete recepten,
-      producten, koppelingen en het archief weg. Je profiel, eetmomenten en
+      <p class="muted">Opnieuw beginnen: dit gooit alle recepten, producten,
+      koppelingen en het archief weg. Je profiel, eetmomenten en
       opgeslagen dagen blijven staan &mdash; tenzij je voor &laquo;alles&raquo; kiest.</p>
       <div class="actions">
         <button class="secondary small danger" id="wipe">Alles wissen</button>

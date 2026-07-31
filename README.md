@@ -11,7 +11,8 @@ Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon geb
 ## Hoe het werkt
 
 1. **Scrapen** — `src/ah/` haalt recepten van ah.nl en producten van de AH-app-API.
-   Elke response wordt vóór het parsen onbewerkt weggeschreven in `scrape_raw`.
+   Elke receptpagina wordt vóór het parsen onbewerkt weggeschreven in `scrape_raw`. Een
+   recept gaat alleen compleet de database in; zie "Alleen complete recepten".
 2. **Omrekenen** — `src/nutrition/units.ts` zet "2 el olijfolie" om naar grammen via
    dichtheid- en stukgewicht-tabellen; alles verderop rekent in grammen, want
    AH-voedingswaarden zijn per 100 g.
@@ -35,13 +36,10 @@ tientallen kandidaten maal tien ingredienten maal de verplichte pauze ertussen l
 genereren van een dag in de minuten. Plannen draait nu in `cacheOnly`-modus en is puur
 een databaseoperatie — een dag staat er in een fractie van een seconde.
 
-**Alleen echte cijfers per ingrediënt.** Is voor minder dan de helft van het
-receptgewicht bekend wat het aan macro's levert, dan komt dat recept niet in een
-dagmenu — liever geen voorstel dan een voorstel dat op een schatting drijft. Er was
-hier ook een modus die het hele gerecht met één factor schaalde (×1,7 op alles) als
-alleen AH's portietotaal bekend was; die is eruit. Wél blijft AH's eigen portietotaal
-gebruikt om de som van de productcijfers op te ijken: de verhouding tussen
-ingrediënten komt uit echte productdata, de schaal uit het cijfer van AH.
+**Alleen echte cijfers per ingrediënt.** De planner hoeft nergens meer op te wegen of
+te schatten: elk recept in de database heeft voedingswaarde per ingrediënt, anders was
+het er niet in gekomen. Er was hier ooit een modus die het hele gerecht met één factor
+schaalde (×1,7 op alles) omdat alleen AH's portietotaal bekend was; die is eruit.
 
 Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
 en ingrediënten kun je vastzetten met `locked`.
@@ -76,37 +74,44 @@ gewone webshoppagina `www.ah.nl/producten/zoeken`. Een 403 of 429 op de zoekopdr
 zelf is iets anders — dat is Akamai's tempo-blokkade, en die blijft een blokkade in
 plaats van stilletjes "geen product gevonden" te worden.
 
-## Alleen schone data
+## Alleen complete recepten
 
-Recepten waar de planner niets mee kan worden automatisch opgeruimd — elke ronde van
-de automaat, en met de knop "Onbruikbare recepten opruimen" ook meteen. Weg gaat een
-recept dat geen ingrediënten heeft, geen doorgerekende voedingswaarde, of geen enkel
-ingrediënt met echte productcijfers erachter. Twee waarborgen: er moet een
-respijtperiode voorbij zijn (standaard 24 uur, `AUTO_PURGE_GRACE_MS`) en elk
-ingrediënt moet al opgezocht zijn — anders gooi je weg wat nog in de pijplijn zit.
-Favorieten en recepten uit een opgeslagen dag blijven altijd staan, en het
-scrape-archief wordt nooit aangeraakt: een weggegooid recept is terug te halen zonder
-ah.nl opnieuw te bevragen.
+Een recept wordt in één keer helemaal afgemaakt of het wordt niet opgeslagen. Compleet
+betekent: elk ingrediënt heeft een AH-product met echte voedingswaarde per 100 g, óf
+het hoort nul te zijn (water, zout, peper — zie `isNutritionFree` in
+`src/nutrition/resolve.ts`).
 
-Scrapen per eetmoment gaat via `POST /api/ingest` met `{"moment":"ontbijt"}`. Er wordt
-breed gezocht en alles wordt bewaard, maar alleen wat AH zélf als dat moment labelt
-telt mee voor de limiet — de rest komt terug in `skipped`.
+Lukt dat niet, dan komt het recept in `skipped_recipes` mét de reden ("geen product
+voor \"middelgroot scharrelei\"") en wordt het nooit opnieuw opgehaald. Raakt het
+verzoekbudget op midden in een recept, dan gebeurt er niets: niet opslaan, niet
+afkeuren — de volgende ronde begint gewoon opnieuw. Dat is het verschil tussen "past nu
+niet" en "kan niet".
+
+Daarmee bestaan halffabricaten niet meer, en dus ook de machinerie eromheen niet: geen
+lege recepten repareren, geen ingrediënten koppelen in een aparte ronde, geen
+onbruikbare recepten opruimen, geen totalen die later nog bijgewerkt moeten worden. Wat
+in de database staat, kan de planner gebruiken.
+
+Scrapen voor één eetmoment gaat via `POST /api/ingest` met `{"moment":"ontbijt"}`. De
+zoektermen sturen alleen wáár gezocht wordt; wat een recept ís, bepaalt AH's eigen
+label — een recept dat AH als lunch labelt is ook bruikbaar als de ontbijtronde het
+tegenkwam.
 
 ## Geen scrape gaat verloren
 
-`scrape_raw` bewaart van elke AH-response de ruwe HTML of JSON, met status en tijdstip,
+`scrape_raw` bewaart van elke receptpagina de ruwe HTML, met status en tijdstip,
 vóórdat er geparsed wordt — ook als het parsen daarna mislukt. Dat is geen cache: er
-wordt nooit iets overschreven of opgeruimd.
+wordt nooit iets overschreven of opgeruimd. Productpagina's gaan er niet in: die zijn
+500–700 kB per stuk en we bewaren er toch alleen de voedingswaarde uit.
 
 Verandert AH zijn pagina's en repareer je de parser, dan haal je met
 `POST /api/reparse` de recepten uit het archief terug zonder ah.nl nog één keer te
 bevragen. `GET /api/stats` laat zien hoeveel scrapes er liggen en hoeveel er nog niet
 geparsed zijn.
 
-Verder slaan `/api/search`, `/api/recipe/:id` en `/api/plan` alles op wat ze
-tegenkomen, inclusief de doorgerekende voedingswaarde. Een recept dat je een keer
-gezocht hebt, kan daarna in een dagmenu terechtkomen — daar is geen aparte ingest meer
-voor nodig.
+`/api/search`, `/api/recipe/:id` en `/api/plan` slaan op wat ze tegenkomen, langs
+dezelfde regel: compleet of niet. Een recept dat je een keer gezocht hebt, kan daarna
+in een dagmenu terechtkomen — daar is geen aparte ingest voor nodig.
 
 ## Opzetten
 
@@ -118,8 +123,8 @@ npm run deploy
 ```
 
 Werk je op een database die er al stond, draai dan de migraties — dat is nodig na
-elke update die er een toevoegt (nu tot en met `0004_app_logs.sql`, voor de
-applicatielog):
+elke update die er een toevoegt (nu tot en met `0005_complete_only.sql`, voor de
+afgekeurde recepten):
 
 ```bash
 npm run db:migrate          # alle migraties op de remote database
@@ -154,13 +159,11 @@ seconde of 10, dus elke 2 minuten laat ruim voldoende lucht, en levert over de
 dag veel meer op dan één grote nachtelijke ingest, die gegarandeerd tegen
 403's aanloopt.
 
-Een ronde doet één ding:
-
-1. **Staan er lege recepten?** Die eerst. Een titel zonder ingredienten is waardeloos
-   voor de planner, en aanvullen kost één pagina per recept.
-2. **Anders:** nieuwe recepten voor het eetmoment dat aan de beurt is. De rotatie gaat
-   langs alle vier de eetmomenten en binnen een moment langs alle zoektermen, zodat de
-   database gelijkmatig alle hoeken raakt in plaats van vijftig pastarecepten.
+Elke ronde doet hetzelfde: zoeken op de term die aan de beurt is, en elk gevonden
+recept helemaal afmaken. De rotatie gaat langs alle vier de eetmomenten en binnen een
+moment langs alle zoektermen, zodat de database gelijkmatig alle hoeken raakt in plaats
+van vijftig pastarecepten. Recepten die we al kennen of al hebben afgekeurd kosten geen
+enkel verzoek — die worden overgeslagen.
 
 Twee remmen zitten erop. Een **dagbudget** (`AUTO_DAILY_MAX`, standaard 250 recepten)
 zodat de automaat niet eindeloos doorhamert, en een **afkoelperiode**: blokkeert AH ons
@@ -174,9 +177,9 @@ ronde), `AUTO_DAILY_MAX`, `AUTO_MIN_INTERVAL_MS` (rust tussen twee verzoeken),
 `AUTO_BACKOFF_MS`, `AUTO_COOLDOWN_MS` en `AUTO_MAX_COOLDOWN_MS`. Hoe vaak de cron zelf
 aftrapt staat in `[triggers]` &rarr; `crons` in `wrangler.toml`.
 
-Op het profieltabblad staat wat de automaat doet: wat er vandaag binnenkwam, hoeveel
-lege recepten er nog open staan, welk eetmoment hierna aan de beurt is, en de laatste
-rondes met hun blokkades. `POST /api/auto/run` draait er nu meteen een; met
+Onder Database staat wat de automaat doet: wat er vandaag binnenkwam, hoeveel recepten
+er in de database staan, hoeveel er zijn afgekeurd, welk eetmoment hierna aan de beurt
+is, en de laatste rondes met hun blokkades. Met "Bijvullen uitzetten" leg je hem stil. `POST /api/auto/run` draait er nu meteen een; met
 `{"force":true}` negeert hij de afkoelperiode en het dagbudget.
 
 ## Gebruik
@@ -219,10 +222,8 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `POST /api/plan` | Eén specifiek recept herberekenen (`recipeId`) |
 | `GET /api/recipe/:id` | Voedingswaarde per ingrediënt, zonder herberekening |
 | `GET /api/search?q=` | Live Allerhande-zoekopdracht; bewaart wat het vindt |
-| `POST /api/ingest` | Recepten scrapen en de cache vullen |
+| `POST /api/ingest` | Een ronde scrapen; alleen complete recepten komen erin |
 | `POST /api/reparse` | Recepten terughalen uit het ruwe archief |
-| `POST /api/repair` | Lege recepten alsnog ophalen (na een geblokkeerde scrape) |
-| `POST /api/purge` | Onbruikbare recepten opruimen (`graceMs` optioneel) |
 | `GET /api/logs` | De applicatielog; `?format=text` geeft platte tekst, `?level=error` filtert |
 | `POST /api/logs/clear` | Log leegmaken |
 | `POST /api/wipe` | Alles wissen (`{"scope":"scrape"}` of `{"scope":"alles"}`); zet het bijvullen uit |
@@ -282,36 +283,34 @@ plan zijn dat er 50, en die grens is makkelijker te raken dan hij klinkt: één 
 met vijftien ingrediënten kostte vroeger dertig productlookups, waarna Cloudflare de
 hele ronde afkapte met "Too many subrequests" en élk resterend recept faalde. Daarom
 telt de scraper zijn verzoeken zelf mee (`AUTO_MAX_REQUESTS`, standaard 40) en stopt
-hij netjes vóór de grens. Het werk is bovendien over rondes verdeeld: ingesten kost
-één verzoek per recept en doet geen productlookups, koppelen gebeurt in de
-enrichment-ronde, en het opnieuw optellen van recepttotalen gebeurt volledig uit de
-database.
+hij netjes vóór de grens — midden in een recept, zonder iets vast te leggen. Dat een
+recept nu in één keer wordt afgemaakt kost dus meer verzoeken per recept, maar het
+worden er snel minder: een product dat één keer opgezocht is, staat in de database en
+kost daarna niets. Bij de eerste rondes komen er een paar recepten binnen, daarna
+steeds meer.
 
-**Eén kapot recept mag de automaat niet gijzelen.** De herstel-laag pakt altijd het
-oudste lege recept, dus een recept dat structureel 403 geeft (verwijderd, verhuisd)
-kwam elke ronde weer als eerste aan de beurt, faalde weer, en zette daarmee ook nog
-eens de afkoelperiode aan — in de praktijk lag het bijvullen anderhalf uur stil voor
-één recept. Een mislukte poging zet het recept nu achteraan de rij, en er wordt pas
-afgekoeld vanaf twee blokkades in één ronde (`AUTO_COOLDOWN_AFTER_BLOCKS`): één 403 op
-één pagina zegt niets over het tempo.
+**Eén kapot recept mag de automaat niet gijzelen.** Een recept dat structureel 403
+geeft (verwijderd, verhuisd) kwam vroeger elke ronde weer als eerste aan de beurt en
+zette daarmee de afkoelperiode aan — in de praktijk lag het bijvullen anderhalf uur
+stil voor één recept. Er wordt daarom pas afgekoeld vanaf twee rondes op rij met
+blokkades (`AUTO_COOLDOWN_AFTER_BLOCKS`): één 403 op één pagina zegt niets over het
+tempo.
 
-**ah.nl remt je af, en dat merk je aan lege recepten.** De site staat achter Akamai's
-botbescherming, die op tempo reageert en niet op aantallen: drie receptpagina's binnen
-een tiende seconde leveren 403's op, terwijl dezelfde pagina's rustig achter elkaar
-gewoon binnenkomen. Een zoekopdracht geeft alleen titels, dus als de detailpagina
-daarna geblokkeerd wordt, blijft een recept met 0 ingredienten achter. De scraper houdt
+**ah.nl remt je af.** De site staat achter Akamai's botbescherming, die op tempo
+reageert en niet op aantallen: drie receptpagina's binnen een tiende seconde leveren
+403's op, terwijl dezelfde pagina's rustig achter elkaar gewoon binnenkomen. Een
+geblokkeerde ronde levert simpelweg niets op — er blijft niets halfs achter. De scraper houdt
 daarom minimaal 700 ms tussen twee verzoeken aan en probeert een 403 opnieuw met
 oplopende wachttijd. Die wachttijd staat op de cron bewust hoog (8 seconden,
 `AUTO_BACKOFF_MS`): uit de log bleek zo'n blokkade tientallen seconden te duren, dus
 herkansen na anderhalve seconde liep gegarandeerd tegen dezelfde muur. Afkoelen gebeurt
-pas na twee rondes op rij met blokkades — één 403 is ruis. Blijven er toch lege recepten staan, dan haalt
-`POST /api/repair` ze alsnog op — het aantal staat in `/api/stats`.
+pas na twee rondes op rij met blokkades — één 403 is ruis.
 
-**Voedingswaarden zijn schattingen.** Stukgewichten ("1 ui = 110 g") en dichtheden
-zijn tabelwaarden, productmatching is fuzzy, en niet elk ingrediënt heeft een
-AH-product. Elk plan meldt daarom `coverage`: het aandeel van het receptgewicht
-waarvoor we echte voedingswaarden hebben. Onder 80% waarschuwt de UI expliciet, want
-dan zijn de totalen een onderschatting.
+**Voedingswaarden komen van AH, maar de omrekening is niet exact.** Elk ingrediënt in
+de database heeft echte productcijfers per 100 g — anders was het recept er niet in
+gekomen. Wat wél een schatting blijft: stukgewichten ("1 ui = 110 g") en dichtheden
+zijn tabelwaarden, en welk product bij "milde olijfolie" hoort wordt op woorden
+gematcht. Een verkeerde koppeling corrigeer je met `POST /api/match`.
 
 **De dagdoelen zijn een richtlijn, geen medisch advies.** Mifflin-St Jeor is een
 formule met spreiding tussen personen; het kcal-doel gaat nooit onder 1200.

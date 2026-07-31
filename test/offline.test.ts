@@ -36,41 +36,7 @@ function explodingFetch() {
   return fetchMock;
 }
 
-/**
- * Recepten zoals ze binnenkomen van AH: mét voedingswaarde van de receptpagina,
- * maar zónder dat de ingredienten aan producten gekoppeld zijn. Precies het
- * geval dat het netwerk op ging.
- */
-async function seedUnmatched(store: Store): Promise<void> {
-  const recipes = [
-    { id: "R-R1", title: "Kwark met granola", kcal: 420, protein: 32 },
-    { id: "R-R2", title: "Kip met rijst", kcal: 640, protein: 52 },
-    { id: "R-R3", title: "Pasta pesto", kcal: 700, protein: 24 },
-    { id: "R-R4", title: "Soep met brood", kcal: 380, protein: 18 },
-  ];
-  for (const r of recipes) {
-    await store.putRecipe({
-      id: r.id,
-      title: r.title,
-      url: `https://www.ah.nl/allerhande/recept/${r.id}`,
-      servings: 2,
-      imageUrl: null,
-      ingredients: [
-        { name: "onbekend hoofdingredient", quantity: 300, unit: "g" },
-        { name: "nog iets onbekends", quantity: 100, unit: "g" },
-      ],
-    });
-    // Twee porties, dus het totaal is het dubbele van wat per portie geldt.
-    await store.putNutrition(
-      r.id,
-      { kcal: r.kcal * 2, protein: r.protein * 2, carbs: 100, fat: 30, fiber: 10 },
-      1,
-      "ah",
-    );
-  }
-}
-
-/** Dezelfde recepten, maar met echte productvoedingswaarde per ingredient. */
+/** Complete recepten: product, koppeling en voedingswaarde staan er allemaal in. */
 async function seedPlannable(store: Store): Promise<void> {
   await seedRecipes(store, [
     { id: "R-R1", title: "Kwark met granola", servings: 2, ingredients: [
@@ -107,30 +73,6 @@ describe("planning without the network", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(day.meals.filter((m) => m.plan)).not.toHaveLength(0);
-  });
-
-  it("plant niets op een recept waarvan alleen het totaal bekend is", async () => {
-    explodingFetch();
-    db = createTestDb();
-    const store = new Store(db);
-    await seedUnmatched(store);
-
-    const day = await generateDay(store, client, {
-      date: "2026-08-01",
-      slots: DEFAULT_SLOTS,
-      daily,
-    });
-
-    // AH's portietotaal is een echt cijfer, maar het zegt niets over welk
-    // ingredient welke macro levert. Zonder dat valt er niets te plannen, en
-    // een voorstel doen alsof dat wel kon is precies wat hier niet meer mag.
-    expect(day.meals.every((m) => m.plan === null)).toBe(true);
-    expect(
-      await rerollSlot(store, client, {
-        targets: { kcal: 300, protein: 25, carbs: 30, fat: 8, fiber: 4 },
-        excludeRecipeIds: [],
-      }),
-    ).toBeNull();
   });
 
   it("rerolls without touching the network either", async () => {

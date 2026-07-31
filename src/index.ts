@@ -3,14 +3,13 @@ import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
 import { extractEmbeddedJson } from "./ah/scrape";
 
 import { Store, type SavedDayMeal } from "./db/queries";
-import { coverageOf, resolveRecipe } from "./nutrition/resolve";
+import { firstIncomplete, resolveRecipe } from "./nutrition/resolve";
 import { autoStatus, configFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
-  computeNutrition,
-  enrichIngredientMatches,
-  ingestQueries,
-  repairEmptyRecipes,
+  completeRecipe,
+  completeRecipeIds,
+  ingestComplete,
   scrapeClient,
 } from "./ingest/pipeline";
 import { splitTargets, type MealSlot } from "./nutrition/split";
@@ -144,61 +143,45 @@ app.get("/api/stats", async (c) => {
   return c.json({
     recipes: await store.countRecipes(),
     plannable: await store.countPlannable(),
-    zonderIngredienten: await store.countWithoutIngredients(),
-    onbruikbaar: await store.countUnusableRecipes(configFrom(c.env).purgeGraceMs),
+    afgekeurd: await store.countSkippedRecipes(),
     scrapes: raw.total,
     unparsed: raw.unparsed,
   });
 });
 
 /**
- * Live Allerhande search. Anders dan vroeger bewaart dit alles wat het tegenkomt:
- * de ruwe payload gaat het archief in en elk gevonden recept wordt op de
- * achtergrond volledig opgehaald en doorgerekend, zodat het meteen bruikbaar is
- * voor de dagplanner in plaats van pas na een aparte ingest.
+ * Live Allerhande search. De ruwe payload gaat het archief in en elk gevonden
+ * recept wordt op de achtergrond compleet gemaakt — mét voedingswaarde per
+ * ingredient — of het komt de database niet in. Het antwoord zelf hoeft daar
+ * niet op te wachten.
  */
 app.get("/api/search", async (c) => {
   const q = c.req.query("q");
   if (!q) return c.json({ error: "missing ?q" }, 400);
 
-  const store = storeFor(c.env);
   const client = clientFor(c.env, c.executionCtx);
   const recipes = await client.searchRecipes(q, Number(c.req.query("size") ?? 20));
 
-  // Per stuk afvangen: één recept dat niet wegschrijft mag de zoekopdracht niet
-  // laten mislukken, want het resultaat is verder gewoon bruikbaar.
-  const saveErrors: string[] = [];
-  for (const stub of recipes) {
-    try {
-      await store.putRecipe(stub);
-    } catch (err) {
-      saveErrors.push(`${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  // Het doorrekenen doet een productzoekopdracht per nieuw ingredient, dus dat
-  // mag de zoekopdracht niet ophouden.
-  c.executionCtx?.waitUntil(hydrate(c.env, recipes.map((r) => r.id)));
+  // Afmaken kost een productzoekopdracht per nieuw ingredient, dus dat mag de
+  // zoekopdracht niet ophouden.
+  c.executionCtx?.waitUntil(completeRecipeIds(c.env, recipes.map((r) => r.id)));
 
   return c.json({
     recipes: recipes.map(({ id, title, url, imageUrl }) => ({ id, title, url, imageUrl })),
-    saved: recipes.length - saveErrors.length,
-    ...(saveErrors.length > 0 ? { errors: saveErrors } : {}),
+    gevonden: recipes.length,
   });
 });
 
 /**
- * Scrapes recipes for the given queries and works out their nutrition, filling the
- * cache that /api/generate searches. This is the slow path — it does a product
- * lookup per new ingredient — so it runs in batches and nightly via cron.
+ * Handmatig een ronde scrapen. Zelfde regel als de automaat: elk gevonden recept
+ * wordt helemaal afgemaakt of afgekeurd — er komt niets half in de database.
  */
 app.post("/api/ingest", async (c) => {
   type IngestBody = { queries?: string[]; limit?: number; moment?: string };
-  // An empty body is the normal case: the UI's "fetch new recipes" button posts "{}".
+  // Een leeg body is het normale geval: de knop in de UI post "{}".
   const body: IngestBody = await c.req.json<IngestBody>().catch(() => ({}));
   const limit = body.limit ?? Number(c.env.INGEST_LIMIT || 20);
 
-  // Scrapen voor één eetmoment: zoek op AH's eigen termen voor dat moment en
-  // houd daarna alleen over wat AH zélf zo gelabeld heeft.
   if (body.moment) {
     const queries = MOMENT_QUERIES[body.moment];
     if (!queries) {
@@ -207,11 +190,11 @@ app.post("/api/ingest", async (c) => {
         400,
       );
     }
-    return c.json({ moment: body.moment, ...(await ingestQueries(c.env, queries, limit, body.moment)) });
+    return c.json({ moment: body.moment, ...(await ingestComplete(c.env, queries, limit)) });
   }
 
   const queries = body.queries ?? c.env.INGEST_QUERIES.split(",").map((s) => s.trim());
-  return c.json(await ingestQueries(c.env, queries, limit));
+  return c.json(await ingestComplete(c.env, queries, limit));
 });
 
 /**
@@ -222,6 +205,7 @@ app.post("/api/ingest", async (c) => {
 app.post("/api/reparse", async (c) => {
   const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
   const store = storeFor(c.env);
+  const client = clientFor(c.env, c.executionCtx);
   const rows = await store.latestRawPerRef("recipe", body.limit ?? 200);
 
   let recovered = 0;
@@ -235,9 +219,13 @@ app.post("/api/reparse", async (c) => {
         failed.push(row.ref);
         continue;
       }
-      await store.putRecipe(recipe);
-      await store.markRawParsed(row.id, true, null);
-      recovered++;
+      // cacheOnly: dit is een reparatie uit het archief, geen scrape. Alleen
+      // recepten waarvan we alle producten al kennen komen er compleet uit; de
+      // rest laat de gewone ronde later alsnog binnen.
+      const outcome = await completeRecipe(store, client, recipe, { cacheOnly: true });
+      await store.markRawParsed(row.id, outcome === "opgeslagen", null);
+      if (outcome === "opgeslagen") recovered++;
+      else failed.push(row.ref);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await store.markRawParsed(row.id, false, message);
@@ -245,63 +233,7 @@ app.post("/api/reparse", async (c) => {
     }
   }
 
-  // Voedingswaarde bijwerken gebeurt op de achtergrond: dat doet netwerk.
-  c.executionCtx?.waitUntil(hydrate(c.env, rows.map((r) => r.ref)));
   return c.json({ examined: rows.length, recovered, failed: failed.slice(0, 20) });
-});
-
-/**
- * Haalt recepten opnieuw op die geen ingredienten hebben. Dat zijn er meestal
- * een hoop: een zoekopdracht levert alleen titels, en als AH's botbescherming
- * daarna de detailpagina's blokkeert, blijven ze leeg staan. Dit is de knop die
- * dat rechttrekt — rustig aan, want haast is precies waarom het misging.
- */
-app.post("/api/repair", async (c) => {
-  const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
-  const store = storeFor(c.env);
-  const result = await repairEmptyRecipes(c.env, body.limit ?? 25);
-  if (result.examined === 0) return c.json({ ...result, remaining: 0, message: "niets te herstellen" });
-
-  return c.json({
-    ...result,
-    remaining: await store.countWithoutIngredients(),
-    errors: result.errors.slice(0, 10),
-  });
-});
-
-/**
- * Vult ingredient -> product koppelingen aan voor recepten die AH's eigen
- * voedingswaarde gebruikten en daardoor nooit een productzoekopdracht deden —
- * zie enrichIngredientMatches in src/ingest/pipeline.ts.
- */
-app.post("/api/enrich", async (c) => {
-  const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
-  const store = storeFor(c.env);
-  const result = await enrichIngredientMatches(c.env, body.limit ?? 15);
-  if (result.examined === 0) {
-    return c.json({ ...result, remaining: 0, message: "alle ingredienten zijn al opgezocht" });
-  }
-
-  return c.json({
-    ...result,
-    remaining: await store.countIngredientNamesWithoutMatch(),
-    errors: result.errors.slice(0, 10),
-  });
-});
-
-/**
- * Meteen opruimen in plaats van wachten op de volgende automatische ronde. Weg
- * gaat alles waar de planner niets mee kan: geen ingredienten, geen
- * voedingswaarde, of geen enkel ingredient met echte productcijfers erachter.
- */
-app.post("/api/purge", async (c) => {
-  const body = await c.req.json<{ graceMs?: number }>().catch(() => ({}) as { graceMs?: number });
-  const store = storeFor(c.env);
-  const config = configFrom(c.env);
-  // graceMs 0 mag: dat is "ruim nu alles op wat nu onbruikbaar is".
-  const graceMs = Number.isFinite(body.graceMs) ? Number(body.graceMs) : config.purgeGraceMs;
-  const purged = await store.purgeUnusableRecipes(graceMs, config.purgeBatch);
-  return c.json({ purged, remaining: await store.countUnusableRecipes(graceMs) });
 });
 
 /**
@@ -334,22 +266,20 @@ app.get("/api/recipe/:id", async (c) => {
   const client = clientFor(c.env, c.executionCtx);
   const id = c.req.param("id");
 
-  let recipe = await store.getRecipe(id);
-  if (!recipe) {
-    recipe = await client.getRecipe(id);
-    if (!recipe) return c.json({ error: "recipe not found" }, 404);
-    await store.putRecipe(recipe);
-  }
+  const known = await store.getRecipe(id);
+  const recipe = known ?? (await client.getRecipe(id));
+  if (!recipe) return c.json({ error: "recipe not found" }, 404);
 
   const resolved = await resolveRecipe(recipe, client, store);
-  // Ook hier de voedingswaarde bewaren: zonder deze rij blijft het recept
-  // onzichtbaar voor de dagplanner, hoe vaak je hem ook opent.
-  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+  // Opslaan gaat via dezelfde regel als het scrapen: compleet of niet. Zo kan het
+  // openen van een recept nooit een half recept in de database achterlaten.
+  const outcome = known ? "opgeslagen" : await completeRecipe(store, client, recipe);
 
   return c.json({
     recipe: resolved.recipe,
     total: resolved.total,
-    coverage: coverageOf(resolved),
+    opgeslagen: outcome === "opgeslagen",
+    ontbreekt: firstIncomplete(resolved),
     ingredients: resolved.ingredients.map((i) => ({
       name: i.raw.name,
       quantity: i.raw.quantity,
@@ -371,15 +301,13 @@ app.post("/api/plan", async (c) => {
   const store = storeFor(c.env);
   const client = clientFor(c.env, c.executionCtx);
 
-  let recipe = await store.getRecipe(body.recipeId);
-  if (!recipe) {
-    recipe = await client.getRecipe(body.recipeId);
-    if (!recipe) return c.json({ error: "recipe not found" }, 404);
-    await store.putRecipe(recipe);
-  }
+  const known = await store.getRecipe(body.recipeId);
+  const recipe = known ?? (await client.getRecipe(body.recipeId));
+  if (!recipe) return c.json({ error: "recipe not found" }, 404);
 
   const resolved = await resolveRecipe(recipe, client, store);
-  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+  // Nieuw recept? Dan gaat het via dezelfde compleet-of-niet-regel de database in.
+  if (!known) await completeRecipe(store, client, recipe);
 
   const plan = planRecipe(resolved, buildTargets(body), {
     portions: body.portions ?? 1,
@@ -829,30 +757,6 @@ function shiftDate(date: string, days: number): string {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
-}
-
-/**
- * Rekent recepten door en bewaart de uitkomst, zodat ze in de dagplanner
- * verschijnen. Bewust foutbestendig per recept: één kapot recept mag de rest niet
- * meeslepen, want dit draait op de achtergrond en niemand ziet de fout.
- */
-async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
-  const store = new Store(env.DB);
-  const client = scrapeClient(env, store);
-
-  for (const id of recipeIds) {
-    try {
-      let recipe = await store.getRecipe(id);
-      if (!recipe || recipe.ingredients.length === 0) {
-        recipe = await client.getRecipe(id);
-        if (!recipe || recipe.ingredients.length === 0) continue;
-        await store.putRecipe(recipe);
-      }
-      await computeNutrition(store, client, recipe);
-    } catch {
-      // volgende recept; dit draait buiten het antwoord om
-    }
-  }
 }
 
 export default {

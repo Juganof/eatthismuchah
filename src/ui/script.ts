@@ -287,7 +287,6 @@ function planCard(meal) {
     + '<strong>' + escapeHtml(p.title) + '</strong>'
     + macroChips(p.perPortion)
     + rows
-    + scalingNote
     + '<div class="actions">'
     + '<button class="secondary small reroll" type="button">&#128260; Ander recept</button>'
     + '<button class="secondary small fav" type="button">&#9829; Favoriet</button>'
@@ -564,10 +563,10 @@ const kib = (bytes) => (bytes < 1024 ? bytes + " B" : Math.round(bytes / 1024) +
 const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
 
 function browseRecipe(r) {
+  // Alles in de database is compleet doorgerekend, dus er is geen "nog niet"-geval.
   const macros = r.nutrition
     ? g(r.nutrition.kcal) + ' kcal &middot; ' + g(r.nutrition.protein) + 'g eiwit'
-      + ' &middot; dekking ' + Math.round((r.coverage || 0) * 100) + '%'
-    : '<span class="warnish">nog niet doorgerekend</span>';
+    : '';
   const flag = r.prefStatus === "fav" ? ' &#9829;' : (r.prefStatus === "blocked" ? ' &#9940;' : '');
   const tags = r.tags.length ? r.tags.map((t) => '<span class="macro">' + escapeHtml(t) + '</span>').join("") : '<span class="macro">geen labels</span>';
   return '<div class="card">'
@@ -751,29 +750,6 @@ document.querySelectorAll(".moment").forEach((button) => {
   });
 });
 
-$("repair").onclick = () => run($("repair"), async () => {
-  const r = await postJson("/api/repair", { limit: 25 });
-  if (r.message) { toast(r.message); return; }
-  toast(r.repaired + " van " + r.examined + " aangevuld; nog " + r.remaining + " te gaan.");
-  loadStats();
-});
-
-$("enrich").onclick = () => run($("enrich"), async () => {
-  const r = await postJson("/api/enrich", { limit: 15 });
-  if (r.message) { toast(r.message); return; }
-  toast(r.matched + " van " + r.examined + " ingredienten gekoppeld; nog " + r.remaining + " te gaan.");
-  loadStats();
-  loadAutoStatus();
-});
-
-$("purge").onclick = () => run($("purge"), async () => {
-  // graceMs 0: nu opruimen, niet pas na de respijtperiode van de automaat.
-  const r = await postJson("/api/purge", { graceMs: 0 });
-  toast(r.purged + " onbruikbare recepten weggegooid; nog " + r.remaining + " te gaan.");
-  loadStats();
-  loadAutoStatus();
-});
-
 $("reparse").onclick = () => run($("reparse"), async () => {
   const r = await postJson("/api/reparse", {});
   toast(r.recovered + " van " + r.examined + " recepten hersteld uit het archief.");
@@ -789,9 +765,8 @@ function renderAutoStatus(s) {
   const chips = '<div class="macros">'
     + '<span class="macro">vandaag <b>' + binnen + ' / ' + s.dagbudget + '</b></span>'
     + '<span class="macro">rondes <b>' + (v.runs || 0) + '</b></span>'
-    + '<span class="macro">nog leeg <b>' + s.openLegeRecepten + '</b></span>'
-    + '<span class="macro">nog koppelingen <b>' + (s.openKoppelingen || 0) + '</b></span>'
-    + '<span class="macro">op te ruimen <b>' + (s.onbruikbareRecepten || 0) + '</b></span>'
+    + '<span class="macro">recepten <b>' + (s.recepten || 0) + '</b></span>'
+    + '<span class="macro">afgekeurd <b>' + (s.afgekeurd || 0) + '</b></span>'
     + '<span class="macro">hierna <b>' + escapeHtml(s.volgende || "-") + '</b></span>'
     + '</div>';
 
@@ -812,11 +787,8 @@ function renderAutoStatus(s) {
     : "";
 
   const laatste = (s.rondes || []).slice(0, 5).map((r) => {
-    const wat = r.mode === "repair"
-      ? r.repaired + " aangevuld"
-      : r.mode === "enrich"
-        ? r.repaired + " koppelingen"
-        : r.added + " opgehaald";
+    const wat = r.added + " opgeslagen"
+      + (r.repaired ? ", " + r.repaired + " afgekeurd" : "");
     const geblokkeerd = r.blocked ? ' <span class="warnish">(' + r.blocked + 'x geblokkeerd)</span>' : "";
     const tijd = new Date(r.started_at).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
     return '<div class="row"><span>' + tijd + ' &middot; ' + escapeHtml(r.detail || r.mode) + '</span>'
@@ -935,8 +907,7 @@ $("autoRun").onclick = () => run($("autoRun"), async () => {
   // doet, dus die mag de afkoelperiode en het dagbudget overslaan.
   const r = await postJson("/api/auto/run", { force: true });
   if (!r.ran) { toast("Overgeslagen: " + r.reason + "."); loadAutoStatus(); return; }
-  const wat = r.mode === "repair" ? r.repaired + " recepten aangevuld" : r.added + " recepten opgehaald";
-  toast(wat + " (" + r.detail + ").");
+  toast(r.added + " recepten opgeslagen, " + (r.rejected || 0) + " afgekeurd (" + r.detail + ").");
   loadAutoStatus();
   loadStats();
   if ($("autoLogsBox").open) { loadAutoLogs(); loadAppLogs(); }
@@ -944,11 +915,8 @@ $("autoRun").onclick = () => run($("autoRun"), async () => {
 
 function loadStats() {
   api("/api/stats").then((s) => {
-    const leeg = s.zonderIngredienten
-      ? " &middot; " + s.zonderIngredienten + " zonder ingredienten"
-      : "";
-    const vuil = s.onbruikbaar ? " &middot; " + s.onbruikbaar + " op te ruimen" : "";
-    $("stats").innerHTML = s.recipes + " recepten (" + s.plannable + " bruikbaar)" + leeg + vuil
+    const afgekeurd = s.afgekeurd ? " &middot; " + s.afgekeurd + " afgekeurd" : "";
+    $("stats").innerHTML = s.recipes + " recepten" + afgekeurd
       + " &middot; " + s.scrapes + " scrapes bewaard";
   }).catch(() => {});
 }

@@ -9,7 +9,7 @@ import {
   type ResolvedIngredient,
   type ResolvedRecipe,
 } from "../ah/types";
-import { bestMatch, searchTermFor } from "./match";
+import { bestMatch, searchTermFor, tokenize } from "./match";
 import { toGrams } from "./units";
 
 /**
@@ -210,29 +210,57 @@ export function coverageOf(resolved: ResolvedRecipe): number {
 }
 
 /**
- * Herschaalt elk ingredient-nutrient met dezelfde factor per macro, zodat de som
- * exact AH's eigen (betrouwbaardere) receptotaal haalt. De verhouding tussen
- * ingredienten — kwark heeft meer eiwit dan een banaan — komt nog steeds uit de
- * echte productdata; alleen de absolute schaal wordt gecorrigeerd, en geklemd
- * zodat een enkel raar product de rest niet kan ontsporen.
+ * Ingredienten waarvoor geen product hoeft te bestaan.
+ *
+ * Water, zout en peper staan in bijna elk recept en leveren geen calorieen. Zonder
+ * deze uitzondering zou de eis "elk ingredient een echt product" vrijwel elk recept
+ * afkeuren, en dan houd je een lege database over in plaats van een strenge.
+ * Nul is hier geen schatting maar de waarheid.
  */
-export function calibrateToTotal(resolved: ResolvedRecipe, ahTotal: Nutrients): ResolvedRecipe {
-  const factors: Partial<Record<keyof Nutrients, number>> = {};
-  for (const key of NUTRIENT_KEYS) {
-    const current = resolved.total[key];
-    const target = ahTotal[key];
-    if (!current || !target) continue;
-    factors[key] = Math.min(2, Math.max(0.5, target / current));
+const NUTRITION_FREE = new Set([
+  "water", "kraanwater", "ijswater", "ijsblokjes", "ijsklontjes", "ijs",
+  "zout", "zeezout", "keukenzout", "peper", "peperkorrels",
+  "azijn", "natuurazijn", "wijnazijn",
+]);
+
+/**
+ * Woorden die alleen iets zeggen over de hoeveelheid, de maalgraad of de kleur.
+ * "Een snuf zout" is zout en "versgemalen zwarte peper" is peper; zonder dit zou
+ * de vrijstelling daar al op stuklopen. Ze staan los van de vrijstellingslijst
+ * zelf, zodat "zwarte bonen" niet ineens nul calorieen krijgt.
+ */
+const AMOUNT_WORDS = new Set([
+  "snuf", "snufje", "mespunt", "scheut", "scheutje", "beetje", "flinke", "lauw",
+  "koud", "warm", "heet", "gefilterd", "bruisend", "plat", "gemalen", "grove",
+  "grof", "versgemalen", "zwarte", "witte", "roze", "groene", "gebroken",
+]);
+
+/**
+ * Of dit ingredient zonder product als compleet mag gelden. Vergelijkt op hele
+ * woorden via dezelfde tokenizer als de matcher, zodat "peperoni" geen peper is
+ * en "water" in "kokoswater" niet meetelt.
+ */
+export function isNutritionFree(name: string): boolean {
+  const words = tokenize(name).filter((word) => !AMOUNT_WORDS.has(word));
+  if (words.length === 0) return false;
+  // Elk overgebleven woord moet vrijgesteld zijn: "water met citroen" is dat niet.
+  return words.every((word) => NUTRITION_FREE.has(word));
+}
+
+/** Een ingredient telt als opgelost als het echte cijfers heeft, of nul hoort te zijn. */
+export function isComplete(ingredient: ResolvedIngredient): boolean {
+  if (isNutritionFree(ingredient.raw.name)) return true;
+  return ingredient.product !== null && ingredient.product.per100g.kcal !== undefined;
+}
+
+/**
+ * Het eerste ingredient dat dit recept onbruikbaar maakt, of null als alles klopt.
+ * De naam gaat mee de log en `skipped_recipes` in: zo is achteraf te zien waaróp
+ * een recept sneuvelde, en of de vrijstellingslijst een woord mist.
+ */
+export function firstIncomplete(resolved: ResolvedRecipe): string | null {
+  for (const ingredient of resolved.ingredients) {
+    if (!isComplete(ingredient)) return ingredient.raw.name;
   }
-
-  const ingredients: ResolvedIngredient[] = resolved.ingredients.map((ing) => {
-    const nutrients: Nutrients = {};
-    for (const [key, value] of Object.entries(ing.nutrients)) {
-      const factor = factors[key as keyof Nutrients] ?? 1;
-      nutrients[key as keyof Nutrients] = value * factor;
-    }
-    return { ...ing, nutrients };
-  });
-
-  return { ...resolved, ingredients, total: sumNutrients(ingredients.map((i) => i.nutrients)) };
+  return null;
 }

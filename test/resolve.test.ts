@@ -1,85 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AhClient, resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
-import { calibrateToTotal, lookupIngredientMatch } from "../src/nutrition/resolve";
+import { firstIncomplete, isNutritionFree, lookupIngredientMatch } from "../src/nutrition/resolve";
 import type { ResolvedRecipe } from "../src/ah/types";
 import { createTestDb, type TestDb } from "./helpers/d1";
 
 /**
- * `calibrateToTotal` is the fix for a recipe whose ingredients are individually
- * matched (so the solver *can* shift kwark up and banaan down) but whose summed
- * nutrition disagrees with AH's own, more trustworthy per-recipe figure — it
- * rescales every ingredient by the same per-macro factor so the sum lines up,
- * without flattening the shape between ingredients.
+ * Twee dingen liggen hier vast: dat een ingredientnaam bij het juiste product
+ * uitkomt en dat dat onthouden wordt, en de regel die bepaalt of een recept
+ * compleet genoeg is om opgeslagen te worden.
  */
 
-const recipe: ResolvedRecipe["recipe"] = {
-  id: "R-R1",
-  title: "Kwark met banaan",
-  url: "https://www.ah.nl/allerhande/recept/R-R1",
-  servings: 1,
-  imageUrl: null,
-  ingredients: [],
-};
-
-function resolvedFixture(): ResolvedRecipe {
-  return {
-    recipe,
-    ingredients: [
-      {
-        raw: { name: "kwark", quantity: 150, unit: "g" },
-        grams: 150,
-        product: { webshopId: "1", title: "AH Kwark", salesUnitSize: null, per100g: {} },
-        gramsSource: "explicit",
-        matchScore: 1,
-        nutrients: { kcal: 90, protein: 15, carbs: 4, fat: 0.5 },
-      },
-      {
-        raw: { name: "banaan", quantity: 1, unit: null },
-        grams: 120,
-        product: { webshopId: "2", title: "AH Bananen", salesUnitSize: null, per100g: {} },
-        gramsSource: "piece",
-        matchScore: 1,
-        nutrients: { kcal: 100, protein: 1, carbs: 23, fat: 0.3 },
-      },
-    ],
-    total: { kcal: 190, protein: 16, carbs: 27, fat: 0.8 },
-  };
-}
-
-describe("calibrateToTotal", () => {
-  it("rescales every ingredient so the sum matches the trusted total", () => {
-    const calibrated = calibrateToTotal(resolvedFixture(), { kcal: 380, protein: 32, carbs: 54, fat: 1.6 });
-    expect(calibrated.total.kcal).toBeCloseTo(380, 0);
-    expect(calibrated.total.protein).toBeCloseTo(32, 0);
-    const kwark = calibrated.ingredients.find((i) => i.raw.name === "kwark")!;
-    expect(kwark.nutrients.kcal).toBeCloseTo(180, 0); // 90 * (380/190)
-  });
-
-  it("keeps the relative shape between ingredients intact", () => {
-    const calibrated = calibrateToTotal(resolvedFixture(), { kcal: 380, protein: 32, carbs: 54, fat: 1.6 });
-    const kwark = calibrated.ingredients.find((i) => i.raw.name === "kwark")!;
-    const banaan = calibrated.ingredients.find((i) => i.raw.name === "banaan")!;
-    // Kwark levert nog steeds veruit het meeste eiwit, ondanks de ijking.
-    expect(kwark.nutrients.protein!).toBeGreaterThan(banaan.nutrients.protein!);
-  });
-
-  it("clamps an extreme mismatch instead of scaling unboundedly", () => {
-    const calibrated = calibrateToTotal(resolvedFixture(), { kcal: 1900 }); // 10x
-    const kwark = calibrated.ingredients.find((i) => i.raw.name === "kwark")!;
-    // Factor is capped at 2x, not 10x: 90 * 2 = 180.
-    expect(kwark.nutrients.kcal).toBeCloseTo(180, 0);
-  });
-
-  it("leaves a macro alone when either side is unknown", () => {
-    const calibrated = calibrateToTotal(resolvedFixture(), { kcal: 380 });
-    const kwark = calibrated.ingredients.find((i) => i.raw.name === "kwark")!;
-    // Geen doelwaarde voor eiwit: factor blijft 1, dus ongewijzigd.
-    expect(kwark.nutrients.protein).toBe(15);
-  });
+let db: TestDb | null = null;
+afterEach(() => {
+  db?.close();
+  db = null;
+  vi.unstubAllGlobals();
+  resetEndpointState();
 });
 
-/** Stubt de hele AH-keten die lookupIngredientMatch nodig heeft. */
+/** Doet alsof AH één product kent: "AH Magere kwark". */
 function stubAhProducts(options: { searchFails?: boolean } = {}) {
   vi.stubGlobal(
     "fetch",
@@ -89,23 +29,18 @@ function stubAhProducts(options: { searchFails?: boolean } = {}) {
         return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
       }
       if (url.includes("/product/search/")) {
+        // 403 op de zoekopdracht zelf is Akamai's tempo-blokkade, geen "niets
+        // gevonden": die hoort door te slaan naar de aanroeper.
         if (options.searchFails) return new Response("Access Denied", { status: 403 });
         return new Response(
-          JSON.stringify({ products: [{ webshopId: 123, title: "AH Kwark", salesUnitSize: "500 g" }] }),
+          JSON.stringify({ products: [{ webshopId: 123, title: "AH Magere kwark" }] }),
           { status: 200 },
         );
       }
-      if (url.includes("/product/detail/")) {
+      if (url.includes("/producten/product/wi")) {
         return new Response(
-          JSON.stringify({
-            webshopId: 123,
-            title: "AH Kwark",
-            salesUnitSize: "500 g",
-            nutritionalInformation: [
-              { name: "Energie (kcal)", value: "60 kcal" },
-              { name: "Eiwitten", value: "10 g" },
-            ],
-          }),
+          '<table data-testid="nutrition-table"><tr><td>Energie</td><td>57 kcal</td></tr>' +
+            "<tr><td>Eiwitten</td><td>10 g</td></tr></table>",
           { status: 200 },
         );
       }
@@ -114,12 +49,69 @@ function stubAhProducts(options: { searchFails?: boolean } = {}) {
   );
 }
 
-let db: TestDb | null = null;
-afterEach(() => {
-  db?.close();
-  db = null;
-  vi.unstubAllGlobals();
-  resetEndpointState();
+/** Eén opgelost ingredient, met of zonder product erachter. */
+function ingredient(name: string, per100g: Record<string, number> | null) {
+  return {
+    raw: { name, quantity: 100, unit: "g" },
+    grams: 100,
+    product: per100g ? { webshopId: "1", title: name, salesUnitSize: null, per100g } : null,
+    gramsSource: "explicit" as const,
+    matchScore: per100g ? 1 : 0,
+    nutrients: per100g ?? {},
+  };
+}
+
+const resolvedWith = (...ingredients: ReturnType<typeof ingredient>[]): ResolvedRecipe => ({
+  recipe: {
+    id: "R-R1",
+    title: "Testrecept",
+    url: "https://www.ah.nl/allerhande/recept/R-R1",
+    servings: 1,
+    imageUrl: null,
+    ingredients: ingredients.map((i) => i.raw),
+  },
+  ingredients,
+  total: {},
+});
+
+describe("isNutritionFree", () => {
+  it("herkent ingredienten die geen voedingswaarde hébben", () => {
+    expect(isNutritionFree("water")).toBe(true);
+    expect(isNutritionFree("200 ml kraanwater")).toBe(true);
+    expect(isNutritionFree("een snuf zout")).toBe(true);
+    expect(isNutritionFree("versgemalen zwarte peper")).toBe(true);
+  });
+
+  it("laat zich niet vangen door een woord dat er alleen op lijkt", () => {
+    // Anders zou "peperoni" als nul tellen en het recept stilletjes te laag uitkomen.
+    expect(isNutritionFree("peperoni")).toBe(false);
+    expect(isNutritionFree("kokoswater")).toBe(false);
+    expect(isNutritionFree("water met citroen")).toBe(false);
+    expect(isNutritionFree("zoute pinda's")).toBe(false);
+  });
+});
+
+describe("firstIncomplete", () => {
+  it("noemt het ingredient waarop het recept sneuvelt", () => {
+    const resolved = resolvedWith(
+      ingredient("havermout", { kcal: 375 }),
+      ingredient("middelgroot scharrelei", null),
+    );
+    expect(firstIncomplete(resolved)).toBe("middelgroot scharrelei");
+  });
+
+  it("vindt niets mis aan een recept met alleen echte cijfers en water", () => {
+    const resolved = resolvedWith(
+      ingredient("havermout", { kcal: 375 }),
+      ingredient("water", null),
+    );
+    expect(firstIncomplete(resolved)).toBeNull();
+  });
+
+  it("keurt een product zonder calorieen af, want dat is geen cijfer", () => {
+    const resolved = resolvedWith(ingredient("mysterie", {}));
+    expect(firstIncomplete(resolved)).toBe("mysterie");
+  });
 });
 
 describe("lookupIngredientMatch", () => {

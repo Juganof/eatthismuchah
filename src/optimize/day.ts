@@ -1,7 +1,7 @@
 import type { AhClient } from "../ah/client";
 import type { Nutrients, ResolvedRecipe } from "../ah/types";
 import type { SlotCandidate, Store } from "../db/queries";
-import { calibrateToTotal, coverageOf, resolveRecipe } from "../nutrition/resolve";
+import { resolveRecipe } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
 import { buildTargets, planRecipe, targetCost, type Plan, type PlanOptions } from "./plan";
@@ -98,19 +98,12 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
 }
 
 /**
- * Maakt het plan voor dit recept, of niets.
+ * Maakt het plan voor dit recept.
  *
- * Er wordt alleen gerekend met echte voedingswaarde per ingredient. Kennen we
- * die voor minder dan de helft van het gewicht, dan komt dit recept niet in een
- * dagmenu — liever geen voorstel dan een voorstel dat op een geschat totaal
- * drijft. (Er was hier ook een modus die het hele gerecht met één factor
- * schaalde als alleen AH's portietotaal bekend was; die is eruit, want dat waren
- * geen cijfers per ingredient maar een gok met een net gezicht.)
- *
- * Is het recepttotaal van AH zelf afkomstig, dan wordt de per-ingredient
- * voedingswaarde eerst geijkt op dat totaal (`calibrateToTotal`): de verhouding
- * tussen ingredienten komt uit echte productdata, en de som moet kloppen met het
- * cijfer waarvan we zeker weten dat het klopt.
+ * Er valt hier niets meer te wegen: alles in de database is compleet, want
+ * anders was het er niet in gekomen (zie `completeRecipe` in
+ * `src/ingest/pipeline.ts`). Elk ingredient heeft echte voedingswaarde, dus de
+ * solver kan gewoon zijn werk doen.
  *
  * `extraBounds` klemt elk ingredient dicht bij zijn oorspronkelijke hoeveelheid —
  * gebruikt voor een "zoals het recept"-optie die niet toevallig dicht bij 1 mag
@@ -118,17 +111,10 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
  */
 function planFor(
   resolved: ResolvedRecipe,
-  candidate: SlotCandidate,
   macroTargets: ReturnType<typeof buildTargets>,
   extraBounds?: Pick<PlanOptions, "minScale" | "maxScale">,
-): Plan | null {
-  if (coverageOf(resolved) < 0.5) return null;
-
-  const source =
-    candidate.source === "ah" && candidate.nutrition.kcal
-      ? calibrateToTotal(resolved, candidate.nutrition)
-      : resolved;
-  return planRecipe(source, macroTargets, { portions: 1, ...extraBounds });
+): Plan {
+  return planRecipe(resolved, macroTargets, { portions: 1, ...extraBounds });
 }
 
 export interface PlanOption {
@@ -192,10 +178,6 @@ async function planCandidates(
 
   const macroTargets = buildTargets({ ...targets, kcalMode: options.kcalMode });
   const results: PlanOption[] = [];
-  // Hoeveel kandidaten er afvielen omdat we hun voedingswaarde niet per
-  // ingredient kennen. Zonder dat cijfer is "geen recept gevonden" een raadsel;
-  // met dat cijfer weet je meteen dat het aan de koppelingen ligt.
-  let zonderCijfers = 0;
 
   for (const candidate of candidates) {
     const recipe = await store.getRecipe(candidate.id);
@@ -216,14 +198,9 @@ async function planCandidates(
 
     const plan = planFor(
       resolved,
-      candidate,
       macroTargets,
       options.pinNearFit && near ? { minScale: 0.9, maxScale: 1.1 } : undefined,
     );
-    if (!plan) {
-      zonderCijfers++;
-      continue;
-    }
 
     let score = scoreOf(plan, candidate, options.slotTags ?? []);
     // Bij herrollen weegt gelijkenis met het vervangen gerecht net zo zwaar als
@@ -234,10 +211,9 @@ async function planCandidates(
   }
 
   await store.log(
-    results.length === 0 ? "warn" : "info",
+    "info",
     "plan",
-    `${results.length} van ${candidates.length} kandidaten bruikbaar (doel ${Math.round(targets.kcal)} kcal)`,
-    { afgevallenZonderCijfers: zonderCijfers },
+    `${results.length} kandidaten doorgerekend (doel ${Math.round(targets.kcal)} kcal)`,
   );
   return results;
 }

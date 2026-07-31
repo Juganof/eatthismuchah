@@ -4,9 +4,13 @@ import { deriveTags, forbiddenTags } from "../nutrition/diet";
 import { DEFAULT_SLOTS, type MealSlot } from "../nutrition/split";
 import { DEFAULT_PROFILE, sanitiseProfile, type Profile } from "../nutrition/targets";
 
-/** How long cached upstream data stays usable before we refetch. */
-const PRODUCT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-const RECIPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Recepten en producten kennen bewust géén vervaltijd meer bij het lezen. Een
+ * compleet recept mag niet stilletjes onbruikbaar worden doordat het product
+ * eronder "verlopen" is — dan staat er ineens 0 kcal bij iets dat gisteren nog
+ * klopte. `fetched_at` blijft als informatie bestaan; opnieuw beginnen doe je
+ * met de wisknop.
+ */
 const MATCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface RecipeSummary {
@@ -43,8 +47,8 @@ export class Store {
 
   async getRecipe(id: string): Promise<Recipe | null> {
     const row = await this.db
-      .prepare("SELECT * FROM recipes WHERE id = ? AND fetched_at > ?")
-      .bind(id, Date.now() - RECIPE_TTL_MS)
+      .prepare("SELECT * FROM recipes WHERE id = ?")
+      .bind(id)
       .first<{
         id: string;
         title: string;
@@ -205,8 +209,8 @@ export class Store {
 
   async getProduct(webshopId: string): Promise<Product | null> {
     const row = await this.db
-      .prepare("SELECT * FROM products WHERE webshop_id = ? AND fetched_at > ?")
-      .bind(webshopId, Date.now() - PRODUCT_TTL_MS)
+      .prepare("SELECT * FROM products WHERE webshop_id = ?")
+      .bind(webshopId)
       .first<{
         webshop_id: string;
         title: string;
@@ -340,79 +344,6 @@ export class Store {
   }
 
   /**
-   * Markeert een mislukte herstelpoging door het recept opnieuw "net opgehaald"
-   * te noemen. Daarmee zakt het naar de staart van de wachtrij hieronder.
-   *
-   * Zonder dit gijzelt één recept de hele automaat: de herstel-laag pakt altijd
-   * het oudste lege recept, dus een recept dat structureel 403 geeft (verwijderd,
-   * verhuisd) komt elke ronde weer als eerste aan de beurt, faalt weer, en zet
-   * daarmee ook nog eens de afkoelperiode aan. In de praktijk lag het bijvullen
-   * daardoor anderhalf uur stil voor één recept.
-   */
-  async markRepairAttempt(id: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE recipes SET fetched_at = ? WHERE id = ?")
-      .bind(Date.now(), id)
-      .run();
-  }
-
-  /** Recepten die nog geen ingredienten hebben, meestal door een geblokkeerde scrape. */
-  async recipesWithoutIngredients(limit: number): Promise<string[]> {
-    const { results } = await this.db
-      .prepare(
-        `SELECT id FROM recipes
-         WHERE json_array_length(ingredients) = 0
-         ORDER BY fetched_at ASC
-         LIMIT ?`,
-      )
-      .bind(limit)
-      .all<{ id: string }>();
-    return (results ?? []).map((r) => r.id);
-  }
-
-  /**
-   * Ingredientnamen die nog nooit bij een AH-product zijn opgezocht, de vaakst
-   * voorkomende eerst — één opzoekactie voor "kwark" verhelpt in één keer elk
-   * recept met kwark erin. Dit is de motor achter `enrichIngredientMatches`
-   * (`src/ingest/pipeline.ts`): recepten met AH's eigen voedingswaarde slaan het
-   * opzoeken van hun ingredienten over tijdens het scrapen (zie `computeNutrition`),
-   * dus zonder dit loopt `ingredient_matches` voor bijna geen enkel recept vol.
-   */
-  private ingredientNamesWithoutMatchQuery(): string {
-    return `SELECT json_extract(ing.value, '$.name') AS name, COUNT(*) AS uses,
-              MAX(json_extract(ing.value, '$.productId')) AS product_id
-       FROM recipes r, json_each(r.ingredients) AS ing
-       WHERE json_extract(ing.value, '$.name') IS NOT NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM ingredient_matches m
-           WHERE m.ingredient_name = json_extract(ing.value, '$.name') AND m.matched_at > ?
-         )
-       GROUP BY name`;
-  }
-
-  async ingredientNamesWithoutMatch(
-    limit: number,
-  ): Promise<{ name: string; uses: number; productId: string | null }[]> {
-    const { results } = await this.db
-      .prepare(`${this.ingredientNamesWithoutMatchQuery()} ORDER BY uses DESC, name ASC LIMIT ?`)
-      .bind(Date.now() - MATCH_TTL_MS, limit)
-      .all<{ name: string; uses: number; product_id: string | number | null }>();
-    return (results ?? []).map((r) => ({
-      name: r.name,
-      uses: r.uses,
-      productId: r.product_id === null ? null : String(r.product_id),
-    }));
-  }
-
-  async countIngredientNamesWithoutMatch(): Promise<number> {
-    const row = await this.db
-      .prepare(`SELECT COUNT(*) AS n FROM (${this.ingredientNamesWithoutMatchQuery()})`)
-      .bind(Date.now() - MATCH_TTL_MS)
-      .first<{ n: number }>();
-    return row?.n ?? 0;
-  }
-
-  /**
    * Shortlists cached recipes for a target. Ordering by protein density rather
    * than raw protein keeps 3000 kcal party dishes out of a 700 kcal dinner slot.
    */
@@ -445,21 +376,14 @@ export class Store {
       diet = [],
       excludeRecipeIds = [],
       excludedTerms = [],
-      minCoverage = 0.5,
       limit = 40,
       recentSinceDays = 10,
     } = options;
 
-    // De laatste voorwaarde houdt recepten buiten de lijst waar de planner toch
-    // niets mee kan; zonder die filter vullen ze de kandidatenlimiet met
-    // gerechten die daarna alsnog afvallen.
-    const conditions = [
-      "n.coverage >= ?",
-      "n.kcal > 0",
-      "COALESCE(p.status, '') <> 'blocked'",
-      Store.HAS_REAL_INGREDIENT_NUTRITION,
-    ];
-    const params: unknown[] = [minCoverage];
+    // Geen dekkingsfilter meer: alles in de database is compleet doorgerekend,
+    // anders was het er niet in gekomen.
+    const conditions = ["n.kcal > 0", "COALESCE(p.status, '') <> 'blocked'"];
+    const params: unknown[] = [];
 
     // Een band rondom het doel: alles daarbuiten kan de solver niet fatsoenlijk
     // bijtrekken zonder het recept onherkenbaar te maken.
@@ -519,138 +443,77 @@ export class Store {
     return row?.n ?? 0;
   }
 
-  /** Recepten die alleen als titel bestaan; die vragen om een herstelronde. */
-  async countWithoutIngredients(): Promise<number> {
-    const row = await this.db
-      .prepare("SELECT COUNT(*) AS n FROM recipes WHERE json_array_length(ingredients) = 0")
-      .first<{ n: number }>();
-    return row?.n ?? 0;
-  }
-
   /**
-   * De ids van recepten waar de planner niets mee kan, en die ook niet meer in de
-   * pijplijn zitten. Onbruikbaar betekent één van drie dingen:
-   *
-   *   1. geen ingredientenlijst — een titel alleen is niets waard;
-   *   2. geen doorgerekende voedingswaarde, of nul calorieen;
-   *   3. geen enkel ingredient met echte productvoedingswaarde erachter.
-   *
-   * Bij (3) telt alleen mee wat af is: zolang er nog een ingredientnaam open
-   * staat om opgezocht te worden, is dit recept niet onbruikbaar maar gewoon nog
-   * niet klaar. Daar bovenop een respijtperiode, want een recept dat net binnen
-   * is heeft de herstel- en koppelrondes nog niet gehad.
-   *
-   * Wat de gebruiker zelf heeft aangeraakt — een opgeslagen dag, een favoriet —
-   * blijft altijd staan.
-   */
-  /**
-   * Waar of niet: heeft dit recept minstens één ingredient met echte
-   * productvoedingswaarde erachter? Dat is de enige grond waarop de planner
-   * rekent, dus zowel de kandidatenlijst als de tellingen gebruiken dit.
-   */
-  private static readonly HAS_REAL_INGREDIENT_NUTRITION = `EXISTS (
-             SELECT 1 FROM json_each(r.ingredients) ing
-             JOIN ingredient_matches m ON m.ingredient_name = json_extract(ing.value, '$.name')
-             JOIN products pr ON pr.webshop_id = m.webshop_id
-             WHERE json_extract(pr.per_100g, '$.kcal') IS NOT NULL
-           )`;
-
-  private unusableRecipeIdsQuery(): string {
-    return `SELECT r.id FROM recipes r
-       WHERE COALESCE(r.first_seen_at, r.fetched_at) <= ?
-         AND NOT EXISTS (SELECT 1 FROM saved_day_meals sm WHERE sm.recipe_id = r.id)
-         AND NOT EXISTS (SELECT 1 FROM recipe_prefs rp WHERE rp.recipe_id = r.id AND rp.status = 'fav')
-         AND (
-           json_array_length(r.ingredients) = 0
-           OR NOT EXISTS (SELECT 1 FROM recipe_nutrition n WHERE n.recipe_id = r.id AND n.kcal > 0)
-           OR (
-             NOT EXISTS (
-               SELECT 1 FROM json_each(r.ingredients) ing
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM ingredient_matches m
-                 WHERE m.ingredient_name = json_extract(ing.value, '$.name')
-               )
-             )
-             AND NOT ${Store.HAS_REAL_INGREDIENT_NUTRITION}
-           )
-         )`;
-  }
-
-  /**
-   * Recepten waarvan het opgeslagen totaal niet meer klopt met wat we inmiddels
-   * weten: er zijn ingredienten aan producten gekoppeld, maar de voedingswaarde
-   * staat nog op de dekking van bij binnenkomst. AH's eigen cijfers blijven
-   * buiten schot — die zijn beter dan onze optelsom en worden niet herrekend.
-   */
-  async recipesNeedingRecompute(limit: number): Promise<string[]> {
-    const { results } = await this.db
-      .prepare(
-        `SELECT r.id FROM recipes r
-         LEFT JOIN recipe_nutrition n ON n.recipe_id = r.id
-         WHERE json_array_length(r.ingredients) > 0
-           AND COALESCE(n.source, 'products') <> 'ah'
-           AND ${Store.HAS_REAL_INGREDIENT_NUTRITION}
-           -- Alleen als er ná de vorige berekening nog een koppeling bij kwam;
-           -- anders zou dezelfde optelsom elke ronde opnieuw gemaakt worden.
-           AND (
-             n.recipe_id IS NULL
-             OR EXISTS (
-               SELECT 1 FROM json_each(r.ingredients) ing
-               JOIN ingredient_matches m ON m.ingredient_name = json_extract(ing.value, '$.name')
-               WHERE m.matched_at >= n.computed_at
-             )
-           )
-         ORDER BY COALESCE(n.computed_at, 0) ASC
-         LIMIT ?`,
-      )
-      .bind(limit)
-      .all<{ id: string }>();
-    return (results ?? []).map((r) => r.id);
-  }
-
-  async countUnusableRecipes(graceMs: number): Promise<number> {
-    const row = await this.db
-      .prepare(`SELECT COUNT(*) AS n FROM (${this.unusableRecipeIdsQuery()})`)
-      .bind(Date.now() - graceMs)
-      .first<{ n: number }>();
-    return row?.n ?? 0;
-  }
-
-  /**
-   * Gooit die recepten weg, inclusief hun doorgerekende voedingswaarde. Het
-   * scrape-archief blijft ongemoeid: dat is de enige tabel die we nooit legen,
-   * dus een weggegooid recept is altijd nog terug te halen zonder ah.nl opnieuw
-   * te bevragen.
-   */
-  async purgeUnusableRecipes(graceMs: number, limit = 500): Promise<number> {
-    const { results } = await this.db
-      .prepare(`${this.unusableRecipeIdsQuery()} LIMIT ?`)
-      .bind(Date.now() - graceMs, limit)
-      .all<{ id: string }>();
-    const ids = (results ?? []).map((r) => r.id);
-    if (ids.length === 0) return 0;
-
-    const holes = ids.map(() => "?").join(", ");
-    await this.db
-      .prepare(`DELETE FROM recipe_nutrition WHERE recipe_id IN (${holes})`)
-      .bind(...ids)
-      .run();
-    await this.db.prepare(`DELETE FROM recipes WHERE id IN (${holes})`).bind(...ids).run();
-    return ids.length;
-  }
-
-  /**
-   * Bruikbaar = de planner kan er echt iets mee. Een recept waarvan alleen AH's
-   * portietotaal bekend is telt dus niet mee, hoe netjes dat cijfer er ook
-   * uitziet: zonder voedingswaarde per ingredient valt er niets te plannen.
+   * Recepten die de planner kan gebruiken. Sinds een recept alleen compleet de
+   * database in gaat, is dat elk recept met een doorgerekend totaal — maar de
+   * telling blijft apart, want hij vertelt of het scrapen ook echt iets oplevert.
    */
   async countPlannable(): Promise<number> {
     const row = await this.db
+      .prepare("SELECT COUNT(*) AS n FROM recipe_nutrition WHERE kcal > 0")
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  // -------------------------------------------------- afgekeurde recepten
+
+  /**
+   * Kennen we dit recept al, of hebben we het al afgekeurd? Allebei betekent
+   * "niet ophalen": een bekend recept is compleet en een afgekeurd recept was dat
+   * niet te krijgen. Eén query, want dit staat in de binnenste lus van een ronde.
+   */
+  async isKnownRecipe(id: string): Promise<boolean> {
+    const row = await this.db
       .prepare(
-        `SELECT COUNT(*) AS n FROM recipe_nutrition n
-         JOIN recipes r ON r.id = n.recipe_id
-         WHERE n.coverage >= 0.5 AND n.kcal > 0 AND ${Store.HAS_REAL_INGREDIENT_NUTRITION}`,
+        `SELECT 1 AS n FROM recipes WHERE id = ?
+         UNION ALL
+         SELECT 1 AS n FROM skipped_recipes WHERE id = ?
+         LIMIT 1`,
       )
+      .bind(id, id)
+      .first<{ n: number }>();
+    return row !== null;
+  }
+
+  /** Legt vast waaróp een recept sneuvelde, zodat we het nooit opnieuw ophalen. */
+  async skipRecipe(id: string, reason: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO skipped_recipes (id, reason, at) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET reason = excluded.reason, at = excluded.at`,
+      )
+      .bind(id, reason, Date.now())
+      .run();
+  }
+
+  /**
+   * Eenmalige opruiming bij de overstap naar "alleen complete recepten": alles
+   * zonder ingredienten of zonder doorgerekende voedingswaarde eruit. Nieuwe
+   * recepten kunnen niet meer in die staat terechtkomen, dus dit is een
+   * migratie en geen onderhoudstaak. Favorieten en opgeslagen dagen blijven.
+   */
+  async dropIncompleteRecipes(): Promise<number> {
+    const ids = `SELECT r.id FROM recipes r
+       LEFT JOIN recipe_nutrition n ON n.recipe_id = r.id
+       WHERE (json_array_length(r.ingredients) = 0 OR COALESCE(n.kcal, 0) <= 0)
+         AND NOT EXISTS (SELECT 1 FROM saved_day_meals sm WHERE sm.recipe_id = r.id)
+         AND NOT EXISTS (SELECT 1 FROM recipe_prefs rp WHERE rp.recipe_id = r.id AND rp.status = 'fav')`;
+    const { results } = await this.db.prepare(ids).all<{ id: string }>();
+    const doomed = (results ?? []).map((r) => r.id);
+    if (doomed.length === 0) return 0;
+
+    const holes = doomed.map(() => "?").join(", ");
+    await this.db
+      .prepare(`DELETE FROM recipe_nutrition WHERE recipe_id IN (${holes})`)
+      .bind(...doomed)
+      .run();
+    await this.db.prepare(`DELETE FROM recipes WHERE id IN (${holes})`).bind(...doomed).run();
+    return doomed.length;
+  }
+
+  async countSkippedRecipes(): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS n FROM skipped_recipes")
       .first<{ n: number }>();
     return row?.n ?? 0;
   }
@@ -1001,6 +864,7 @@ export class Store {
       "products",
       "recipes",
       "scrape_raw",
+      "skipped_recipes",
       "ingest_runs",
       "app_state",
       "app_logs",
