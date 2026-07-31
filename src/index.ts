@@ -1,10 +1,17 @@
 import { Hono } from "hono";
 import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
 import { extractEmbeddedJson } from "./ah/scrape";
-import type { Nutrients, Recipe } from "./ah/types";
+
 import { Store, type SavedDayMeal } from "./db/queries";
-import { deriveTags } from "./nutrition/diet";
 import { coverageOf, resolveRecipe } from "./nutrition/resolve";
+import { autoStatus, configFrom, runAutoIngest } from "./ingest/auto";
+import {
+  MOMENT_QUERIES,
+  computeNutrition,
+  ingestQueries,
+  repairEmptyRecipes,
+  scrapeClient,
+} from "./ingest/pipeline";
 import { splitTargets, type MealSlot } from "./nutrition/split";
 import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
 import { generateDay, rerollSlot, type DayPlan } from "./optimize/day";
@@ -17,6 +24,13 @@ export interface Env {
   AH_USER_AGENT: string;
   INGEST_QUERIES: string;
   INGEST_LIMIT: string;
+  /** Instellingen voor het automatisch bijvullen; zie src/ingest/auto.ts. */
+  AUTO_BATCH?: string;
+  AUTO_DAILY_MAX?: string;
+  AUTO_MIN_INTERVAL_MS?: string;
+  AUTO_COOLDOWN_MS?: string;
+  /** Index signature zodat configFrom de bovenstaande vars kan uitlezen. */
+  [key: string]: unknown;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -127,11 +141,11 @@ app.post("/api/ingest", async (c) => {
         400,
       );
     }
-    return c.json(await ingest(c.env, queries, limit, body.moment));
+    return c.json({ moment: body.moment, ...(await ingestQueries(c.env, queries, limit, body.moment)) });
   }
 
   const queries = body.queries ?? c.env.INGEST_QUERIES.split(",").map((s) => s.trim());
-  return c.json(await ingest(c.env, queries, limit));
+  return c.json(await ingestQueries(c.env, queries, limit));
 });
 
 /**
@@ -179,33 +193,30 @@ app.post("/api/reparse", async (c) => {
 app.post("/api/repair", async (c) => {
   const body = await c.req.json<{ limit?: number }>().catch(() => ({}) as { limit?: number });
   const store = storeFor(c.env);
-  const ids = await store.recipesWithoutIngredients(body.limit ?? 25);
-  if (ids.length === 0) return c.json({ pending: 0, repaired: 0, message: "niets te herstellen" });
+  const result = await repairEmptyRecipes(c.env, body.limit ?? 25);
+  if (result.examined === 0) return c.json({ ...result, remaining: 0, message: "niets te herstellen" });
 
-  const client = clientFor(c.env, c.executionCtx);
-  let repaired = 0;
-  const errors: string[] = [];
+  return c.json({
+    ...result,
+    remaining: await store.countWithoutIngredients(),
+    errors: result.errors.slice(0, 10),
+  });
+});
 
-  for (const id of ids) {
-    try {
-      const recipe = await client.getRecipe(id);
-      if (!recipe || recipe.ingredients.length === 0) {
-        errors.push(`${id}: nog steeds geen ingredienten`);
-        continue;
-      }
-      await store.putRecipe(recipe);
-      if (!(await storeAhNutrition(store, recipe))) {
-        const resolved = await resolveRecipe(recipe, client, store);
-        await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
-      }
-      repaired++;
-    } catch (err) {
-      errors.push(`${id}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+/**
+ * De stand van zaken van het automatisch bijvullen: wat er vandaag binnenkwam,
+ * of AH ons afknijpt, en wat er nog open staat.
+ */
+app.get("/api/auto/status", async (c) =>
+  c.json(await autoStatus(c.env, configFrom(c.env))),
+);
 
-  const remaining = await store.recipesWithoutIngredients(1000);
-  return c.json({ examined: ids.length, repaired, remaining: remaining.length, errors: errors.slice(0, 10) });
+/** Eén ronde nu draaien, in plaats van wachten op de cron. */
+app.post("/api/auto/run", async (c) => {
+  const body = await c.req.json<{ force?: boolean }>().catch(() => ({}) as { force?: boolean });
+  // `force` slaat de afkoelperiode en het dagbudget over; handig om te testen,
+  // maar niet iets om te herhalen als AH net aan het blokkeren was.
+  return c.json(await runAutoIngest(c.env, configFrom(c.env), { force: body.force === true }));
 });
 
 /** Nutrition and ingredient breakdown for one recipe, without any rescaling. */
@@ -651,33 +662,13 @@ function shiftDate(date: string, days: number): string {
 }
 
 /**
- * Bewaart de voedingswaarde die AH zelf bij het recept vermeldt. Dat scheelt een
- * productzoekopdracht per ingredient én is nauwkeuriger, dus dit is het pad dat
- * we het liefst nemen. AH geeft de waarden per portie; de rest van de app rekent
- * met het hele recept.
- */
-async function storeAhNutrition(store: Store, recipe: Recipe): Promise<boolean> {
-  const perServing = recipe.nutritionPerServing;
-  if (!perServing) return false;
-
-  const servings = recipe.servings > 0 ? recipe.servings : 1;
-  const total: Nutrients = {};
-  for (const [key, value] of Object.entries(perServing)) {
-    total[key as keyof Nutrients] = value * servings;
-  }
-  // Coverage 1: dit komt van de bron zelf, daar valt niets aan te schatten.
-  await store.putNutrition(recipe.id, total, 1, "ah");
-  return true;
-}
-
-/**
  * Rekent recepten door en bewaart de uitkomst, zodat ze in de dagplanner
  * verschijnen. Bewust foutbestendig per recept: één kapot recept mag de rest niet
  * meeslepen, want dit draait op de achtergrond en niemand ziet de fout.
  */
 async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
   const store = new Store(env.DB);
-  const client = new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw));
+  const client = scrapeClient(env, store);
 
   for (const id of recipeIds) {
     try {
@@ -687,109 +678,25 @@ async function hydrate(env: Env, recipeIds: string[]): Promise<void> {
         if (!recipe || recipe.ingredients.length === 0) continue;
         await store.putRecipe(recipe);
       }
-      // Heeft AH het zelf al uitgerekend, dan zijn we klaar.
-      if (await storeAhNutrition(store, recipe)) continue;
-      const resolved = await resolveRecipe(recipe, client, store);
-      await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved));
+      await computeNutrition(store, client, recipe);
     } catch {
       // volgende recept; dit draait buiten het antwoord om
     }
   }
 }
 
-/**
- * Zoektermen per eetmoment. AH's zoekfunctie kent zijn eigen indeling
- * ("menugang": ontbijt, lunch, tussendoortje, hoofdgerecht), maar die filter zit
- * achter een GraphQL-aanroep die we niet kunnen vastpinnen. Zoeken op deze
- * woorden levert dezelfde hoek van de catalogus op, en de controle achteraf
- * gebeurt op AH's eigen labels — zie `momentOf` hieronder.
- */
-const MOMENT_QUERIES: Record<string, string[]> = {
-  ontbijt: ["ontbijt", "havermout", "kwark ontbijt", "smoothie", "pannenkoeken", "yoghurt"],
-  lunch: ["lunch", "salade", "soep", "broodje", "wrap", "tosti"],
-  snack: ["tussendoortje", "snack", "energiereep", "hapje", "dip"],
-  diner: ["hoofdgerecht", "pasta", "ovenschotel", "curry", "rijst", "traybake"],
-};
-
-/** Het eetmoment dat AH zelf aan een recept hangt, of null als het niets zegt. */
-function momentOf(recipe: Recipe): string | null {
-  for (const tag of deriveTags(recipe)) {
-    if (tag === "ontbijt" || tag === "lunch" || tag === "snack" || tag === "diner") return tag;
-  }
-  return null;
-}
-
-/**
- * `wantedMoment` maakt van een brede zoekopdracht een gerichte: alles wordt
- * opgehaald en bewaard (weggooien van een scrape doen we nooit), maar alleen wat
- * AH als dat moment labelt telt mee voor de limiet.
- */
-async function ingest(env: Env, queries: string[], limit: number, wantedMoment?: string) {
-  const store = new Store(env.DB);
-  const client = new AhClient(env.AH_USER_AGENT, (raw) => void store.putRaw(raw));
-  const perQuery = Math.max(1, Math.ceil(limit / Math.max(1, queries.length)));
-  let added = 0;
-  // Opgehaald en bewaard, maar niet van het gevraagde eetmoment.
-  let skipped = 0;
-  const errors: string[] = [];
-
-  for (const query of queries) {
-    let found: Recipe[];
-    try {
-      found = await client.searchRecipes(query, perQuery);
-    } catch (err) {
-      errors.push(`search "${query}": ${err instanceof Error ? err.message : String(err)}`);
-      continue;
-    }
-
-    // Zoekresultaten dragen geen ingredienten, maar wel titel en id. Die eerst
-    // wegschrijven: valt het ophalen van de detailpagina daarna om, dan weten we
-    // in elk geval nog dat dit recept bestaat. Per stuk afvangen, want één
-    // onopslaanbaar recept mag de hele ingest niet laten klappen.
-    for (const stub of found) {
-      try {
-        await store.putRecipe(stub);
-      } catch (err) {
-        errors.push(`opslaan ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    for (const stub of found) {
-      if (added >= limit) break;
-      try {
-        const full = stub.ingredients.length > 0 ? stub : await client.getRecipe(stub.id);
-        if (!full || full.ingredients.length === 0) continue;
-        await store.putRecipe(full);
-        // AH's eigen voedingswaarde eerst: die is er meestal, is nauwkeuriger, en
-        // scheelt een productzoekopdracht per ingredient.
-        if (!(await storeAhNutrition(store, full))) {
-          const resolved = await resolveRecipe(full, client, store);
-          await store.putNutrition(full.id, resolved.total, coverageOf(resolved));
-        }
-        // Bewaren doen we altijd; meetellen alleen als het echt dit moment is.
-        if (wantedMoment && momentOf(full) !== wantedMoment) {
-          skipped++;
-          continue;
-        }
-        added++;
-      } catch (err) {
-        errors.push(`recipe ${stub.id}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    if (added >= limit) break;
-  }
-
-  return {
-    added,
-    ...(wantedMoment ? { moment: wantedMoment, skipped } : {}),
-    errors,
-  };
-}
-
 export default {
   fetch: app.fetch,
+  /**
+   * Draait elk kwartier. Eén grote nachtelijke ingest liep gegarandeerd tegen
+   * AH's botbescherming aan; veel kleine rondes met rust ertussen komen er wel
+   * door en leveren over een dag genomen veel meer op.
+   */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const queries = env.INGEST_QUERIES.split(",").map((s) => s.trim());
-    ctx.waitUntil(ingest(env, queries, Number(env.INGEST_LIMIT || 20)));
+    ctx.waitUntil(
+      runAutoIngest(env, configFrom(env as unknown as Record<string, unknown>)).then((result) => {
+        console.log("auto-ingest:", JSON.stringify(result));
+      }),
+    );
   },
 };

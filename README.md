@@ -93,8 +93,37 @@ curl -X POST https://<jouw-worker>.workers.dev/api/ingest \
   -d '{"queries":["kip","zalm","pasta","vegetarisch"],"limit":40}'
 ```
 
-Een cron in `wrangler.toml` vult de cache daarna elke nacht verder aan. Hoe meer
-recepten er staan, hoe beter de dagmenu's worden.
+Daarna vult de database zichzelf aan — zie hieronder. Hoe meer recepten er staan,
+hoe beter de dagmenu's worden.
+
+## Automatisch bijvullen
+
+Elk kwartier draait een kleine ronde, de hele dag door. Dat is geen willekeurige
+keuze: ah.nl staat achter Akamai en reageert op tempo, niet op aantallen. Eén grote
+nachtelijke ingest loopt gegarandeerd tegen 403's aan, terwijl 96 kleine rondes met
+rust ertussen er wél doorkomen en samen veel meer opleveren.
+
+Een ronde doet één ding:
+
+1. **Staan er lege recepten?** Die eerst. Een titel zonder ingredienten is waardeloos
+   voor de planner, en aanvullen kost één pagina per recept.
+2. **Anders:** nieuwe recepten voor het eetmoment dat aan de beurt is. De rotatie gaat
+   langs alle vier de eetmomenten en binnen een moment langs alle zoektermen, zodat de
+   database gelijkmatig alle hoeken raakt in plaats van vijftig pastarecepten.
+
+Twee remmen zitten erop. Een **dagbudget** (`AUTO_DAILY_MAX`, standaard 250 recepten)
+zodat de automaat niet eindeloos doorhamert, en een **afkoelperiode**: blokkeert AH ons
+toch, dan ligt het bijvullen een half uur stil. Doorgaan alsof er niets aan de hand is
+maakt het namelijk alleen erger.
+
+Alles is in te stellen via `[vars]` in `wrangler.toml`: `AUTO_BATCH` (recepten per
+ronde), `AUTO_DAILY_MAX`, `AUTO_MIN_INTERVAL_MS` (rust tussen twee verzoeken),
+`AUTO_BACKOFF_MS` en `AUTO_COOLDOWN_MS`.
+
+Op het profieltabblad staat wat de automaat doet: wat er vandaag binnenkwam, hoeveel
+lege recepten er nog open staan, welk eetmoment hierna aan de beurt is, en de laatste
+rondes met hun blokkades. `POST /api/auto/run` draait er nu meteen een; met
+`{"force":true}` negeert hij de afkoelperiode en het dagbudget.
 
 ## Gebruik
 
@@ -136,6 +165,8 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 | `POST /api/ingest` | Recepten scrapen en de cache vullen |
 | `POST /api/reparse` | Recepten terughalen uit het ruwe archief |
 | `POST /api/repair` | Lege recepten alsnog ophalen (na een geblokkeerde scrape) |
+| `GET /api/auto/status` | Stand van het automatisch bijvullen |
+| `POST /api/auto/run` | Nu een ronde draaien in plaats van wachten op de cron |
 | `GET /api/browse/recipes` | Alle recepten met labels, voeding en dekking |
 | `GET /api/browse/products` | Alle producten met hun koppelingen |
 | `GET /api/browse/matches` | Ingredient naar product, missers eerst |
@@ -182,7 +213,7 @@ authenticatie op. Zet de worker niet op een publieke URL die je met anderen deel
 ## Ontwikkelen
 
 ```bash
-npm test          # 168 tests, geen netwerk nodig
+npm test          # 178 tests, geen netwerk nodig
 npm run typecheck
 npm run dev
 ```

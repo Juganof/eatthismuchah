@@ -3,9 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2026-07-30"
 compatibility_flags = ["nodejs_compat"]
 
-# Ingest a batch of fresh Allerhande recipes every night at 03:00 UTC.
+# Elk kwartier een kleine ronde in plaats van één grote 's nachts. ah.nl staat
+# achter Akamai en reageert op tempo, niet op aantallen: een grote ingest loopt
+# gegarandeerd tegen 403's aan, terwijl 96 kleine rondes per dag er wel doorkomen
+# en samen veel meer opleveren. Zie src/ingest/auto.ts.
 [triggers]
-crons = ["0 3 * * *"]
+crons = ["*/15 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -17,5 +20,16 @@ database_id = "c05c3aa9-97b5-4c93-8208-5ea1ce6d8248"
 AH_USER_AGENT = "Appie/8.22.3 Model/phone Android/13-M"
 # Comma-separated recipe search terms used by the nightly cron ingest.
 INGEST_QUERIES = "kip,zalm,pasta,vegetarisch,rijst,salade"
-# How many recipes the cron job ingests per run.
+# How many recipes a handmatige ingest ophaalt per aanroep.
 INGEST_LIMIT = "40"
+
+# --- automatisch bijvullen -------------------------------------------------
+# Recepten per automatische ronde. Klein houden: met 700 ms tussen verzoeken
+# duurt een ronde van 8 recepten ruim 5 seconden, en dat past comfortabel.
+AUTO_BATCH = "8"
+# Bovengrens per dag, zodat de automaat niet eindeloos doorhamert.
+AUTO_DAILY_MAX = "250"
+# Minimale rust tussen twee verzoeken aan ah.nl.
+AUTO_MIN_INTERVAL_MS = "700"
+# Hoe lang er niets gebeurt nadat AH ons geblokkeerd heeft.
+AUTO_COOLDOWN_MS = "1800000"

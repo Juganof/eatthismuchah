@@ -537,6 +537,50 @@ $("reparse").onclick = () => run($("reparse"), async () => {
   loadStats();
 });
 
+function renderAutoStatus(s) {
+  const v = s.vandaag || {};
+  const binnen = (v.added || 0) + (v.repaired || 0);
+  const chips = '<div class="macros">'
+    + '<span class="macro">vandaag <b>' + binnen + ' / ' + s.dagbudget + '</b></span>'
+    + '<span class="macro">rondes <b>' + (v.runs || 0) + '</b></span>'
+    + '<span class="macro">nog leeg <b>' + s.openLegeRecepten + '</b></span>'
+    + '<span class="macro">hierna <b>' + escapeHtml(s.volgende || "-") + '</b></span>'
+    + '</div>';
+
+  // Afkoelen is geen storing maar precies de bedoeling; alleen even melden.
+  const koelt = s.afkoelenTot
+    ? '<p class="note">AH blokkeerde ons even. Het bijvullen ligt stil tot '
+      + new Date(s.afkoelenTot).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })
+      + '.</p>'
+    : "";
+
+  const laatste = (s.rondes || []).slice(0, 5).map((r) => {
+    const wat = r.mode === "repair"
+      ? r.repaired + " aangevuld"
+      : r.added + " opgehaald";
+    const geblokkeerd = r.blocked ? ' <span class="warnish">(' + r.blocked + 'x geblokkeerd)</span>' : "";
+    const tijd = new Date(r.started_at).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+    return '<div class="row"><span>' + tijd + ' &middot; ' + escapeHtml(r.detail || r.mode) + '</span>'
+      + '<span class="amt">' + wat + geblokkeerd + '</span></div>';
+  }).join("");
+
+  $("autoStatus").innerHTML = chips + koelt
+    + (laatste ? '<p class="muted" style="margin:10px 0 0">Laatste rondes:</p>' + laatste : "");
+}
+
+function loadAutoStatus() {
+  api("/api/auto/status").then(renderAutoStatus).catch(() => {});
+}
+
+$("autoRun").onclick = () => run($("autoRun"), async () => {
+  const r = await postJson("/api/auto/run", {});
+  if (!r.ran) { toast("Overgeslagen: " + r.reason + "."); loadAutoStatus(); return; }
+  const wat = r.mode === "repair" ? r.repaired + " recepten aangevuld" : r.added + " recepten opgehaald";
+  toast(wat + " (" + r.detail + ").");
+  loadAutoStatus();
+  loadStats();
+});
+
 function loadStats() {
   api("/api/stats").then((s) => {
     const leeg = s.zonderIngredienten
@@ -563,4 +607,5 @@ api("/api/profile").then(fillProfile).catch(() => {});
 api("/api/slots").then(renderSlots).catch(() => {});
 api("/api/exclusions").then((d) => { $("exclusions").value = d.terms.join(", "); }).catch(() => {});
 loadStats();
+loadAutoStatus();
 `;

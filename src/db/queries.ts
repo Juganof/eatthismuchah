@@ -632,6 +632,83 @@ export class Store {
       .first<{ id: string; kind: string; url: string; body: string }>();
   }
 
+  // ------------------------------------------------ automatisch bijvullen
+
+  async getState(key: string): Promise<string | null> {
+    const row = await this.db
+      .prepare("SELECT value FROM app_state WHERE key = ?")
+      .bind(key)
+      .first<{ value: string }>();
+    return row?.value ?? null;
+  }
+
+  async setState(key: string, value: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(key, value, Date.now())
+      .run();
+  }
+
+  /** Opent een ronde en geeft het id terug, zodat hij later afgesloten kan worden. */
+  async startRun(mode: string, detail: string | null): Promise<number> {
+    const row = await this.db
+      .prepare(
+        "INSERT INTO ingest_runs (started_at, mode, detail) VALUES (?, ?, ?) RETURNING id",
+      )
+      .bind(Date.now(), mode, detail)
+      .first<{ id: number }>();
+    return row?.id ?? 0;
+  }
+
+  async finishRun(
+    id: number,
+    result: { added?: number; repaired?: number; blocked?: number; errors?: string[] },
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE ingest_runs SET finished_at = ?, added = ?, repaired = ?, blocked = ?, errors = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        Date.now(),
+        result.added ?? 0,
+        result.repaired ?? 0,
+        result.blocked ?? 0,
+        result.errors && result.errors.length > 0 ? JSON.stringify(result.errors.slice(0, 5)) : null,
+        id,
+      )
+      .run();
+  }
+
+  /** Wat er sinds een tijdstip is binnengehaald; voedt het dagbudget. */
+  async runTotalsSince(since: number): Promise<{ added: number; repaired: number; blocked: number; runs: number }> {
+    const row = await this.db
+      .prepare(
+        `SELECT COUNT(*) AS runs, COALESCE(SUM(added),0) AS added,
+                COALESCE(SUM(repaired),0) AS repaired, COALESCE(SUM(blocked),0) AS blocked
+         FROM ingest_runs WHERE started_at >= ?`,
+      )
+      .bind(since)
+      .first<{ runs: number; added: number; repaired: number; blocked: number }>();
+    return {
+      runs: row?.runs ?? 0,
+      added: row?.added ?? 0,
+      repaired: row?.repaired ?? 0,
+      blocked: row?.blocked ?? 0,
+    };
+  }
+
+  async recentRuns(limit: number): Promise<Record<string, unknown>[]> {
+    const { results } = await this.db
+      .prepare("SELECT * FROM ingest_runs ORDER BY started_at DESC LIMIT ?")
+      .bind(limit)
+      .all<Record<string, unknown>>();
+    return results ?? [];
+  }
+
   // ---------------------------------------------------------------- profiel
 
   /** Er is precies één profiel; ontbreekt het, dan geldt het standaardprofiel. */

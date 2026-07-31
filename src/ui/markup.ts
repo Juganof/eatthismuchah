@@ -155,6 +155,17 @@ export function browseTab(): string {
 export function adminCard(): string {
   return `
   <div class="card">
+    <h2>Automatisch bijvullen</h2>
+    <p class="muted">De database vult zichzelf elk kwartier een beetje aan, in het
+    tempo dat ah.nl toestaat. Lege recepten worden eerst afgemaakt, daarna komen
+    de eetmomenten om de beurt aan bod.</p>
+    <div id="autoStatus"></div>
+    <div class="actions">
+      <button class="secondary small" id="autoRun">Nu een ronde draaien</button>
+    </div>
+  </div>
+
+  <div class="card">
     <details>
       <summary>Beheer &amp; database</summary>
       <p class="muted">Recepten ophalen voor één eetmoment. AH's eigen indeling
