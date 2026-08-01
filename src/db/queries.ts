@@ -13,6 +13,14 @@ import { DEFAULT_PROFILE, sanitiseProfile, type Profile } from "../nutrition/tar
  */
 const MATCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Hoe lang een afgekeurd recept afgekeurd blijft. Niet voor eeuwig: de reden is
+ * vaak dat ónze matcher een product niet vond, en een verbetering daarin zou zulke
+ * recepten anders nooit meer bereiken. Eén nieuwe poging per twee weken kost twee
+ * verzoeken en houdt de deur op een kier.
+ */
+const SKIP_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
 export interface RecipeSummary {
   id: string;
   title: string;
@@ -458,19 +466,20 @@ export class Store {
   // -------------------------------------------------- afgekeurde recepten
 
   /**
-   * Kennen we dit recept al, of hebben we het al afgekeurd? Allebei betekent
-   * "niet ophalen": een bekend recept is compleet en een afgekeurd recept was dat
-   * niet te krijgen. Eén query, want dit staat in de binnenste lus van een ronde.
+   * Kennen we dit recept al, of hebben we het recent afgekeurd? Allebei betekent
+   * "niet ophalen": een bekend recept is compleet, en een vers afgekeurd recept
+   * was dat niet te krijgen. Een oude afkeuring telt niet meer mee — zie
+   * `SKIP_TTL_MS`. Eén query, want dit staat in de binnenste lus van een ronde.
    */
   async isKnownRecipe(id: string): Promise<boolean> {
     const row = await this.db
       .prepare(
         `SELECT 1 AS n FROM recipes WHERE id = ?
          UNION ALL
-         SELECT 1 AS n FROM skipped_recipes WHERE id = ?
+         SELECT 1 AS n FROM skipped_recipes WHERE id = ? AND at > ?
          LIMIT 1`,
       )
-      .bind(id, id)
+      .bind(id, id, Date.now() - SKIP_TTL_MS)
       .first<{ n: number }>();
     return row !== null;
   }

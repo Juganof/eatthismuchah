@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 /** Doet alsof AH één product kent: "AH Magere kwark". */
-function stubAhProducts(options: { searchFails?: boolean } = {}) {
+function stubAhProducts(options: { searchFails?: boolean; titles?: string[] } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -32,8 +32,11 @@ function stubAhProducts(options: { searchFails?: boolean } = {}) {
         // 403 op de zoekopdracht zelf is Akamai's tempo-blokkade, geen "niets
         // gevonden": die hoort door te slaan naar de aanroeper.
         if (options.searchFails) return new Response("Access Denied", { status: 403 });
+        const titles = options.titles ?? ["AH Magere kwark"];
         return new Response(
-          JSON.stringify({ products: [{ webshopId: 123, title: "AH Magere kwark" }] }),
+          JSON.stringify({
+            products: titles.map((title, i) => ({ webshopId: 123 + i, title })),
+          }),
           { status: 200 },
         );
       }
@@ -181,5 +184,67 @@ describe("terugval op de webshoppagina als de mobiele API dichtzit", () => {
     } finally {
       db.close();
     }
+  });
+});
+
+describe("als de volledige naam niets oplevert", () => {
+  it("zoekt nog één keer op de kernnaam", async () => {
+    const queries: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/mobile-auth/")) {
+          return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
+        }
+        if (url.includes("/product/search/")) {
+          const query = new URL(url).searchParams.get("query") ?? "";
+          queries.push(query);
+          // Zoals AH zich gedraagt: op de hele receptregel niets bruikbaars, op
+          // het kernwoord wel.
+          const products = query === "scharrelei"
+            ? [{ webshopId: 5, title: "AH Scharreleieren" }]
+            : [{ webshopId: 9, title: "AH Roomboter" }];
+          return new Response(JSON.stringify({ products }), { status: 200 });
+        }
+        if (url.includes("/producten/product/wi")) {
+          return new Response(
+            '<table data-testid="nutrition-table"><tr><td>Energie</td><td>139 kcal</td></tr>' +
+              "<tr><td>Eiwitten</td><td>12 g</td></tr></table>",
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      }),
+    );
+
+    db = createTestDb();
+    const store = new Store(db);
+    const client = new AhClient("test", undefined, { minIntervalMs: 0 });
+
+    const result = await lookupIngredientMatch("middelgroot scharrelei", client, store);
+
+    expect(queries).toEqual(["middelgroot scharrelei", "scharrelei"]);
+    expect(result.outcome).toBe("matched");
+    expect(result.product?.title).toBe("AH Scharreleieren");
+  });
+
+  it("legt vast wat het zag toen er niets matchte", async () => {
+    stubAhProducts({ searchFails: false, titles: ["Snelfilterkoffie", "Koffiebonen"] });
+    db = createTestDb();
+    const store = new Store(db);
+    const client = new AhClient("test", undefined, { minIntervalMs: 0 });
+
+    await lookupIngredientMatch("sjalot", client, store);
+
+    // Zonder deze regel is een afgekeurd recept een dood spoor: je ziet wel
+    // dát het misging, niet waaróp.
+    const logs = await store.recentLogs(10);
+    const miss = logs.find((l) => l.message.includes("geen match"));
+    expect(miss).toBeDefined();
+    expect(JSON.parse(miss!.detail!)).toMatchObject({
+      kandidaten: 2,
+      titels: expect.arrayContaining(["Snelfilterkoffie"]),
+    });
   });
 });

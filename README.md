@@ -82,10 +82,20 @@ het hoort nul te zijn (water, zout, peper — zie `isNutritionFree` in
 `src/nutrition/resolve.ts`).
 
 Lukt dat niet, dan komt het recept in `skipped_recipes` mét de reden ("geen product
-voor \"middelgroot scharrelei\"") en wordt het nooit opnieuw opgehaald. Raakt het
-verzoekbudget op midden in een recept, dan gebeurt er niets: niet opslaan, niet
-afkeuren — de volgende ronde begint gewoon opnieuw. Dat is het verschil tussen "past nu
-niet" en "kan niet".
+voor \"middelgroot scharrelei\""). Twee weken lang wordt het niet opnieuw opgehaald;
+daarna krijgt het één nieuwe kans, want de reden is vaak dat ónze matcher het product
+niet vond en een verbetering daarin zou zulke recepten anders nooit meer bereiken.
+
+**Alleen een geslaagde zoekopdracht die niets oplevert is een oordeel.** Een blokkade,
+een netwerkfout of een opgeraakt verzoekbudget betekent "later nog eens proberen": dan
+wordt er niets opgeslagen én niets afgekeurd. Dat onderscheid is duur geleerd — toen
+een fout hier stilletjes "geen product" werd, keurde één 403 een prima recept voorgoed
+af.
+
+Vindt de matcher niets op de hele receptregel, dan volgt één herkansing op de kernnaam:
+"middelgroot scharrelei" levert niets op, "scharrelei" wel (0,38 tegen 0,60 — net onder
+en net boven de drempel). Blijft het bij niets, dan noteert de log wat hij zág:
+hoeveel kandidaten, de eerste drie titels en de hoogste score.
 
 Daarmee bestaan halffabricaten niet meer, en dus ook de machinerie eromheen niet: geen
 lege recepten repareren, geen ingrediënten koppelen in een aparte ronde, geen

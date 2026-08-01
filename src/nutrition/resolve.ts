@@ -9,7 +9,7 @@ import {
   type ResolvedIngredient,
   type ResolvedRecipe,
 } from "../ah/types";
-import { bestMatch, searchTermFor, tokenize } from "./match";
+import { bestMatch, headTermFor, scoreMatch, searchTermFor, tokenize } from "./match";
 import { toGrams } from "./units";
 
 /**
@@ -58,10 +58,34 @@ export async function lookupIngredientMatch(
   client: AhClient,
   store: Store,
 ): Promise<{ outcome: MatchOutcome; product: Product | null; score: number }> {
-  const candidates = await client.searchProducts(searchTermFor(name), 8);
+  let candidates = await client.searchProducts(searchTermFor(name), 8);
+  let match = bestMatch(name, candidates);
 
-  const match = bestMatch(name, candidates);
+  // Tweede poging op de kernnaam. "middelgroot scharrelei" tegen "AH
+  // Scharreleieren" scoort 0,38 — net onder de drempel, puur omdat "middelgroot"
+  // nergens op slaat. Op "scharrelei" alleen is het 0,60. Er wordt dan ook op de
+  // kernnaam gescoord: we hebben er bewust op gezocht, dus de rest van de regel
+  // afstraffen zou het antwoord opnieuw wegdrukken. Alleen als de eerste poging
+  // faalde, dus hooguit één extra verzoek per ingredientnaam.
+  const head = match ? null : headTermFor(name);
+  if (head) {
+    const extra = await client.searchProducts(head, 8);
+    const better = bestMatch(head, extra);
+    if (better) {
+      candidates = extra;
+      match = better;
+    }
+  }
+
   if (!match) {
+    // Waaróm er niets matchte is het enige spoor dat we hebben als een recept
+    // hierop sneuvelt: aan de drempel, aan de zoekterm, of aan AH zelf.
+    await store.log("info", "match", `"${name}" geen match`, {
+      kandidaten: candidates.length,
+      titels: candidates.slice(0, 3).map((c) => c.title),
+      beste: Math.round(bestScoreAmong(head ?? name, candidates) * 100) / 100,
+      ...(head ? { ookGezochtOp: head } : {}),
+    });
     await store.putMatch(name, null, 0);
     return { outcome: "no-match", product: null, score: 0 };
   }
@@ -87,6 +111,13 @@ export async function lookupIngredientMatch(
   return { outcome: "matched", product: full, score: match.score };
 }
 
+/** De hoogste score onder de kandidaten, ook als die onder de drempel bleef. */
+function bestScoreAmong(name: string, candidates: Product[]): number {
+  let best = 0;
+  for (const candidate of candidates) best = Math.max(best, scoreMatch(name, candidate.title));
+  return best;
+}
+
 /**
  * Haalt het product op waar AH de receptregel zelf aan koppelt. Geen zoekopdracht,
  * geen scorefunctie: één detailaanroep (of nul, als we het product al kennen).
@@ -109,9 +140,13 @@ export async function lookupLinkedProduct(
 }
 
 /**
- * Finds the AH product for one ingredient line, consulting the cache first. Failed
- * lookups are cached too — an ingredient that has no sensible product ("water",
- * "peper naar smaak") should not trigger a search on every single request.
+ * Zoekt het product voor één receptregel, cache eerst.
+ *
+ * Fouten gaan hier bewust omhoog in plaats van als "geen product" te eindigen.
+ * Dat verschil is duur gebleken: toen een blokkade of een opgeraakt verzoekbudget
+ * hier stilletjes `null` werd, keurde `firstIncomplete` een prima recept af — en
+ * afgekeurd is voorgoed. Een fout betekent "later nog eens proberen"; alleen een
+ * geslaagde zoekopdracht die niets bruikbaars oplevert is een echt oordeel.
  */
 async function resolveProduct(
   ingredient: RawIngredient,
@@ -125,17 +160,13 @@ async function resolveProduct(
     const linked = await store.getProduct(ingredient.productId);
     if (linked) return { product: linked, score: 1 };
     if (!cacheOnly) {
-      try {
-        const product = await lookupLinkedProduct(
-          ingredient.name,
-          ingredient.productId,
-          client,
-          store,
-        );
-        if (product) return { product, score: 1 };
-      } catch {
-        // netwerkfout: hieronder gewoon verder met de gewone weg
-      }
+      const product = await lookupLinkedProduct(
+        ingredient.name,
+        ingredient.productId,
+        client,
+        store,
+      );
+      if (product) return { product, score: 1 };
     }
   }
 
@@ -151,14 +182,8 @@ async function resolveProduct(
   // dat in de minuten. Onbekend is dan gewoon onbekend.
   if (cacheOnly) return { product: null, score: 0 };
 
-  try {
-    const { product, score } = await lookupIngredientMatch(ingredient.name, client, store);
-    return { product, score };
-  } catch {
-    // A failed search must not poison the cache: leave it unrecorded so the next
-    // request tries again rather than remembering a network blip as "no match".
-    return { product: null, score: 0 };
-  }
+  const { product, score } = await lookupIngredientMatch(ingredient.name, client, store);
+  return { product, score };
 }
 
 /**

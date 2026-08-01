@@ -119,3 +119,16 @@ export function searchTermFor(ingredientName: string): string {
   const tokens = tokenize(ingredientName);
   return tokens.length > 0 ? tokens.slice(0, 3).join(" ") : ingredientName.trim();
 }
+
+/**
+ * De kernnaam: het laatste betekenisdragende woord. In het Nederlands staat de
+ * hoofdzaak achteraan ("middelgroot scharrel*ei*", "diepvries blauwe *bessen*"),
+ * en dat is ook waar de productcatalogus op is ingericht. Bedoeld als tweede
+ * poging wanneer de volledige naam niets oplevert; null als die tweede poging
+ * hetzelfde zou zoeken als de eerste.
+ */
+export function headTermFor(ingredientName: string): string | null {
+  const tokens = tokenize(ingredientName);
+  if (tokens.length < 2) return null;
+  return tokens[tokens.length - 1]!;
+}

@@ -413,3 +413,57 @@ describe("na een budgetstop", () => {
     expect(await store.countRecipes()).toBeGreaterThan(0);
   });
 });
+
+describe("een fout is geen oordeel over het recept", () => {
+  it("keurt niets af als AH de productzoekopdracht blokkeert", async () => {
+    stubAh({ blockProducts: true });
+    const env = envFor();
+    const store = new Store(env.DB);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    // Dit was de bug: een 403 kwam als "geen product" terug, waarna een prima
+    // recept voorgoed werd afgekeurd. Een blokkade is "later nog eens".
+    expect(result.rejected).toBe(0);
+    expect(await store.countSkippedRecipes()).toBe(0);
+    expect(result.blocked).toBeGreaterThan(0);
+  });
+
+  it("probeert een recept opnieuw zodra de blokkade voorbij is", async () => {
+    stubAh({ blockProducts: true });
+    const env = envFor();
+    const store = new Store(env.DB);
+    await runAutoIngest(env, fastConfig);
+
+    stubAh();
+    await runAutoIngest(env, fastConfig, { force: true });
+
+    expect(await store.countRecipes()).toBeGreaterThan(0);
+  });
+});
+
+describe("een afkeuring verloopt", () => {
+  it("probeert het na twee weken opnieuw", async () => {
+    stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    const env = envFor();
+    const store = new Store(env.DB);
+    await runAutoIngest(env, fastConfig);
+    expect(await store.countSkippedRecipes()).toBeGreaterThan(0);
+
+    // Verse afkeuring: niet opnieuw ophalen.
+    let calls = stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    await runAutoIngest(env, fastConfig);
+    expect(calls.filter((c) => c.includes("/allerhande/recept/"))).toHaveLength(0);
+
+    // Twee weken later wél: misschien vindt de matcher het inmiddels wel.
+    await db!
+      .prepare("UPDATE skipped_recipes SET at = ?")
+      .bind(Date.now() - 15 * 24 * 60 * 60 * 1000)
+      .run();
+    calls = stubAh();
+    await runAutoIngest(env, fastConfig);
+
+    expect(calls.filter((c) => c.includes("/allerhande/recept/")).length).toBeGreaterThan(0);
+    expect(await store.countRecipes()).toBeGreaterThan(0);
+  });
+});
