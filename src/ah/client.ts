@@ -7,7 +7,8 @@ const PRODUCT_SEARCH_URL = "https://api.ah.nl/mobile-services/product/search/v2"
 const PRODUCT_DETAIL_URL = "https://api.ah.nl/mobile-services/product/detail/v4/fir";
 const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
 const PRODUCT_SEARCH_PAGE = "https://www.ah.nl/producten/zoeken";
-const RECIPE_BASE = "https://www.ah.nl/allerhande";
+const SITE_BASE = "https://www.ah.nl";
+const RECIPE_BASE = `${SITE_BASE}/allerhande`;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -586,7 +587,7 @@ export function collectRecipes(root: unknown): Recipe[] {
       const found: Recipe = {
         id: recipeId,
         title,
-        url: url ?? `${RECIPE_BASE}/recept/${recipeId}`,
+        url: absoluteAhUrl(url) ?? `${RECIPE_BASE}/recept/${recipeId}`,
         servings: servingsOf(v),
         imageUrl: findImageUrl(v),
         ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
@@ -659,13 +660,27 @@ export function parseRecipeCards(html: string): Recipe[] {
     out.push({
       id,
       title: decodeHtml(titleAttr.replace(/^Recept:\s*/i, "")).trim(),
-      url: href.startsWith("http") ? href : `https://www.ah.nl${href}`,
+      url: absoluteAhUrl(href) ?? `${RECIPE_BASE}/recept/${id}`,
       servings: 4,
       imageUrl: null,
       ingredients: [],
     });
   }
   return out;
+}
+
+/**
+ * Maakt er een link van die buiten ah.nl ook werkt.
+ *
+ * De paginastate schrijft `href` als pad ("/allerhande/recept/R-R1202683/..."),
+ * en zo'n pad in de UI zetten laat de browser hem oplossen tegen ónze eigen
+ * worker-URL: dan opent "Bereiding op ah.nl" een 404 op workers.dev. Dat is
+ * precies wat er gebeurde.
+ */
+export function absoluteAhUrl(url: string | null): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  return url.startsWith("/") ? `${SITE_BASE}${url}` : null;
 }
 
 function recipeIdFromUrl(url: string | null): string | null {

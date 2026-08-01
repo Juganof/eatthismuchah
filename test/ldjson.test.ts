@@ -100,7 +100,7 @@ describe("de paginastate en de ld+json van dezelfde pagina", () => {
   const FLIGHT_RECIPE = {
     id: 1202636,
     title: "Courgette-frittata met roomkaas en citroen",
-    href: "https://www.ah.nl/allerhande/recept/R-R1202636/courgette-frittata",
+    href: "/allerhande/recept/R-R1202636/courgette-frittata",
     serving: { number: 4 },
     ingredients: [
       { name: { singular: "courgette", plural: "courgettes" }, quantity: 2, quantityUnit: { singular: "stuk" } },
@@ -142,6 +142,15 @@ describe("de paginastate en de ld+json van dezelfde pagina", () => {
   it("neemt de rijke ingredienten van de paginastate", () => {
     // Met de eenheid apart; de ld+json heeft alleen "4 el milde olijfolie".
     expect(parsed[0]!.ingredients[1]).toMatchObject({ name: "milde olijfolie", quantity: 4, unit: "el" });
+  });
+
+  it("maakt van het pad in de paginastate een volledige ah.nl-link", () => {
+    // De paginastate schrijft alleen "/allerhande/recept/...". Zo'n pad in de UI
+    // laat de browser hem oplossen tegen onze eigen worker-URL, en dan opent
+    // "Bereiding op ah.nl" een 404 op workers.dev.
+    expect(parsed[0]!.url).toBe(
+      "https://www.ah.nl/allerhande/recept/R-R1202636/courgette-frittata",
+    );
   });
 
   it("neemt de voedingswaarde uit de ld+json, die de paginastate niet heeft", () => {
