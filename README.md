@@ -10,40 +10,32 @@ Draait als één Cloudflare Worker met D1, dus je kunt hem vanaf je telefoon geb
 
 ## Hoe het werkt
 
-1. **Scrapen** — `src/ah/` haalt recepten van ah.nl en producten van de AH-app-API.
-   Elke receptpagina wordt vóór het parsen onbewerkt weggeschreven in `scrape_raw`. Een
-   recept gaat alleen compleet de database in; zie "Alleen complete recepten".
+1. **Scrapen** — `src/ah/` haalt recepten van ah.nl: één pagina per recept, met de
+   ingrediënten én AH's eigen voedingswaarde per portie. Elke pagina wordt vóór het
+   parsen onbewerkt weggeschreven in `scrape_raw`. Een recept gaat alleen compleet de
+   database in; zie "Alleen complete recepten".
 2. **Omrekenen** — `src/nutrition/units.ts` zet "2 el olijfolie" om naar grammen via
-   dichtheid- en stukgewicht-tabellen; alles verderop rekent in grammen, want
-   AH-voedingswaarden zijn per 100 g.
-3. **Matchen** — hangt AH zelf een webshopproduct aan de receptregel (de "bestel de
-   ingrediënten"-koppeling), dan is dát het product: geen zoekopdracht, geen gok. Pas
-   als die koppeling ontbreekt, zoekt `src/nutrition/match.ts` er zelf een bij met een
-   betrouwbaarheidsscore. Onder 0,4 melden we "geen match" in plaats van te gokken.
-4. **Doelen bepalen** — `src/nutrition/targets.ts` rekent het profiel om naar een
+   dichtheid- en stukgewicht-tabellen. Dat gewicht is de verdeelsleutel waarmee
+   `src/nutrition/resolve.ts` AH's recepttotaal over de ingrediënten verdeelt.
+3. **Doelen bepalen** — `src/nutrition/targets.ts` rekent het profiel om naar een
    dagdoel (Mifflin-St Jeor → TDEE → tekort of overschot), `src/nutrition/split.ts`
    verdeelt dat over de eetmomenten.
-5. **Optimaliseren** — `src/optimize/solver.ts` kiest per ingrediënt een schaalfactor
-   binnen redelijke grenzen. Het probleem is convex-kwadratisch, dus projected
-   gradient descent vindt het globale optimum: geen heuristiek, geen willekeur.
-6. **Dag samenstellen** — `src/optimize/day.ts` doet dat per eetmoment en schuift wat
+4. **Optimaliseren** — `src/optimize/solver.ts` kiest een schaalfactor binnen redelijke
+   grenzen. Het probleem is convex-kwadratisch, dus projected gradient descent vindt het
+   globale optimum: geen heuristiek, geen willekeur.
+5. **Dag samenstellen** — `src/optimize/day.ts` doet dat per eetmoment en schuift wat
    het ene moment te veel of te weinig opleverde door naar de volgende, zodat de dag
    klopt in plaats van alleen elk moment apart.
 
-**Plannen raakt ah.nl nooit aan.** Dat klinkt vanzelfsprekend maar was het niet: een
-ingredient zonder gekoppeld product liet `resolveRecipe` alsnog zoeken, en met
-tientallen kandidaten maal tien ingredienten maal de verplichte pauze ertussen liep het
-genereren van een dag in de minuten. Plannen draait nu in `cacheOnly`-modus en is puur
-een databaseoperatie — een dag staat er in een fractie van een seconde.
+**Plannen raakt ah.nl nooit aan.** `resolveRecipe` is pure rekenkunde: alles wat nodig
+is staat bij het recept in de database. Een dag staat er in een fractie van een seconde.
 
-**Cijfers per ingrediënt, altijd.** De planner hoeft nergens meer op te wegen: elk
-recept in de database heeft voedingswaarde per ingrediënt, anders was het er niet in
-gekomen — desnoods toegerekend uit AH's eigen recepttotaal (zie "Alleen complete
-recepten"). Er was hier ooit een modus die het hele gerecht met één factor schaalde
-(×1,7 op alles) omdat alleen AH's portietotaal bekend was; die is eruit.
-
-Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
-en ingrediënten kun je vastzetten met `locked`.
+**Het gerecht schaalt als geheel.** De voedingswaarde per ingrediënt is een aandeel van
+AH's recepttotaal naar gewicht, geen meting. Regels dan los van elkaar schalen zou
+verzonnen precisie zijn — "minder olie" scheelt in die rekensom evenveel als "minder
+courgette", en dat is niet zo. Het plan kiest daarom één factor voor het hele gerecht,
+en dat is precies wél waar AH's cijfer over gaat: een halve portie is de helft van
+alles. Ingrediënten kun je nog steeds vastzetten met `locked`.
 
 ## AH's eigen gegevens gebruiken
 
@@ -54,72 +46,64 @@ ingredienten alleen:
   `tussendoortje`, `hoofdgerecht`). Die zijn gezaghebbend voor het eetmoment: raden op
   de titel gaat mis, want een "Sandwich met kip" is volgens AH een tussendoortje.
   Alleen als AH niets over de menugang zegt, valt de app terug op de titelheuristiek.
-* **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Die wordt
-  overgenomen zonder één productzoekopdracht, en een eigen berekening overschrijft hem
-  nooit (`recipe_nutrition.source`). Hij vult ook de gaten die het matchen laat vallen —
-  zie "Alleen complete recepten" hieronder — en wordt daarom bij het recept bewaard
-  (`recipes.nutrition_per_serving`), zodat het plannen er ook bij kan.
+* **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Dit is sinds
+  het loslaten van de productkoppeling de énige bron van voedingswaarde in de app, en
+  wordt bij het recept bewaard (`recipes.nutrition_per_serving`) zodat het plannen er
+  ook bij kan. Let op: dit blok staat alleen in de `ld+json`, terwijl de rijke
+  ingrediënten alleen in de paginastate staan. De pagina bevat het recept dus twee keer
+  en `collectRecipes` voegt beide samen — deed het dat niet, dan hield elk recept nul
+  voedingswaarde over.
 * **De paginastate zelf** — bij de huidige App Router staat die in de
   `self.__next_f`-chunks (zie `extractFlightJson`), en daar is het recept veel rijker
   dan in de `ld+json`: naam als `{singular, plural}`, `quantityUnit` naast de
   hoeveelheid, de kant-en-klare regel `"2 el milde olijfolie"` als terugval, en tags
   met AH's eigen indeling (`menugang: borrelhapje`, `speciale-wensen: vegetarisch`).
-* **Productlinks per ingrediënt** worden gebruikt als ze er zijn — dan komt de
-  voedingswaarde rechtstreeks van dat product, zonder zoeken en zonder kans op het
-  verkeerde product. In de praktijk staan ze *niet* in de receptpagina: de knop "Kies
-  producten" haalt ze apart op. De code pikt ze op zodra ze er wel in staan; tot die
-  tijd zoekt `match.ts` het product er zelf bij.
+**Producten zitten er bewust niet meer in.** De app zocht vroeger bij elk ingrediënt
+een AH-product om de voedingswaarde per 100 g op te halen. Dat is eruit, om drie
+redenen die elkaar versterkten: het matchen op naam raadde te vaak mis ("middelgroot
+scharrelei" tegen "AH Scharreleieren", "snoepkomkommer" tegen niets), veel verse
+producten hebben bij AH helemaal géén voedingswaardetabel, en één misser keurde een
+verder prima recept voorgoed af. Bovendien kostte het vijftien tot dertig verzoeken per
+recept, waar de receptpagina er één kost — met dat verschil passen er per ronde
+tientallen recepten in plaats van een handjevol.
 
-Voor productzoekopdrachten gebruikt de app de mobiele API, en als die het anonieme
-token weigert (403 op `mobile-auth`, wat in de praktijk gebeurt) valt hij terug op de
-gewone webshoppagina `www.ah.nl/producten/zoeken`. Een 403 of 429 op de zoekopdracht
-zelf is iets anders — dat is Akamai's tempo-blokkade, en die blijft een blokkade in
-plaats van stilletjes "geen product gevonden" te worden.
+De productzoekopdracht bestaat nog wel als handmatige actie (`GET
+/api/products/search`, `POST /api/match`), voor wie een ingrediënt zelf aan een product
+wil koppelen. Automatisch gebeurt er niets meer mee, en de boodschappenlijst zet alleen
+nog een productlink bij ingrediënten die je zo zelf gekoppeld hebt.
 
 ## Alleen complete recepten
 
-Een recept wordt in één keer helemaal afgemaakt of het wordt niet opgeslagen. Compleet
-betekent: van elk ingrediënt is de voedingswaarde bekend. Dat kan op drie manieren, in
-deze volgorde:
+Een recept wordt in één keer opgeslagen of helemaal niet. Compleet betekent nog maar
+twee dingen, allebei van dezelfde pagina: een ingrediëntenlijst, en AH's eigen
+voedingswaarde per portie. Dat laatste staat op vrijwel elke Allerhande-pagina, dus
+afkeuren is de uitzondering geworden in plaats van de regel.
 
-1. **Een AH-product** met een echte voedingswaardetabel per 100 g.
-2. **Nul**, omdat het ingrediënt niets bijdraagt (water, zout, peper — zie
-   `isNutritionFree` in `src/nutrition/resolve.ts`).
-3. **Het deel van AH's eigen recepttotaal** dat aan die regel toevalt
-   (`fillFromRecipeTotal`).
+Het recepttotaal is AH's cijfer maal het aantal porties. Per ingrediënt wordt dat naar
+gewicht verdeeld (`resolveRecipe`), want de solver rekent per regel: 400 g kip krijgt
+vier keer zoveel als 100 g, en een handvol peterselie bijna niets. Water, zout en peper
+krijgen nul — die dragen echt niets bij, en meetellen zou hun aandeel van de rest
+afsnoepen (`isNutritionFree`). Zo'n toegerekende regel heet `geschat`: het totaal is
+van AH, de verdeling erover is van ons.
 
-Die derde stap is er niet voor de sier. De eis "een product bij elke regel" leek streng
-maar was vooral onhaalbaar: juist de gewoonste dingen — courgette, een scharrelei, een
-sjalot, verse kruiden — staan bij AH als versproduct zónder voedingswaardetabel, en één
-zo'n regel keurde een verder prima recept voorgoed af. In de praktijk sneuvelde daar
-bijna alles op. AH zet de voedingswaarde per portie wél op de receptpagina, en dat is
-hun eigen berekening over het hele gerecht: nauwkeuriger dan wat wij uit losse producten
-optellen. Het verschil tussen dat totaal en wat de gematchte producten al verklaren, is
-precies wat de ontbrekende regels samen bijdragen; dat verschil wordt naar gewicht over
-die regels verdeeld. Zo houdt de solver per ingrediënt cijfers om mee te rekenen en telt
-het geheel op tot wat AH zegt. Zulke regels heten `geschat` en zijn als zodanig
-zichtbaar in de UI en in `recipe_nutrition.source` (`ah` in plaats van `products`).
+Ontbreekt de voedingswaarde, dan komt het recept in `skipped_recipes` mét de reden
+("geen voedingswaarde op de receptpagina"). Twee weken lang wordt het niet
+opnieuw opgehaald; daarna krijgt het één nieuwe kans, want AH rekent een recept soms
+later alsnog door en een blijvende afkeuring zou dat nooit meer opmerken.
 
-Lukt geen van de drie, dan komt het recept in `skipped_recipes` mét de reden ("geen
-voedingswaarde voor \"middelgroot scharrelei\""). Twee weken lang wordt het niet
-opnieuw opgehaald; daarna krijgt het één nieuwe kans, want de reden is vaak dat ónze matcher het product
-niet vond en een verbetering daarin zou zulke recepten anders nooit meer bereiken.
-
-**Alleen een geslaagde zoekopdracht die niets oplevert is een oordeel.** Een blokkade,
+**Alleen een pagina die binnenkwam is een oordeel.** Een blokkade,
 een netwerkfout of een opgeraakt verzoekbudget betekent "later nog eens proberen": dan
 wordt er niets opgeslagen én niets afgekeurd. Dat onderscheid is duur geleerd — toen
-een fout hier stilletjes "geen product" werd, keurde één 403 een prima recept voorgoed
-af.
-
-Vindt de matcher niets op de hele receptregel, dan volgt één herkansing op de kernnaam:
-"middelgroot scharrelei" levert niets op, "scharrelei" wel (0,38 tegen 0,60 — net onder
-en net boven de drempel). Blijft het bij niets, dan noteert de log wat hij zág:
-hoeveel kandidaten, de eerste drie titels en de hoogste score.
+een fout hier stilletjes een oordeel werd, keurde één 403 een prima recept voorgoed af.
 
 Daarmee bestaan halffabricaten niet meer, en dus ook de machinerie eromheen niet: geen
 lege recepten repareren, geen ingrediënten koppelen in een aparte ronde, geen
 onbruikbare recepten opruimen, geen totalen die later nog bijgewerkt moeten worden. Wat
 in de database staat, kan de planner gebruiken.
+
+Eén ronde kost één verzoek voor de zoekpagina plus één per recept. Daar passen er dertig
+in (`AUTO_BATCH`), tegen twee of drie toen elk ingrediënt nog een productzoekopdracht
+kostte.
 
 Scrapen voor één eetmoment gaat via `POST /api/ingest` met `{"moment":"ontbijt"}`. De
 zoektermen sturen alleen wáár gezocht wordt; wat een recept ís, bepaalt AH's eigen
@@ -165,8 +149,7 @@ De `ALTER TABLE`-regels in `0002` en `0006` falen met "duplicate column name" al
 al zijn; dat is verwacht en betekent dat je klaar bent. Daarom staan de migraties met
 `;` achter elkaar en niet met `&&`: zo loopt de rest gewoon door.
 
-Daarna eenmalig vullen — dit is de trage stap, want elk nieuw ingrediënt kost een
-productlookup:
+Daarna eenmalig vullen. Eén verzoek per recept, met 700 ms ertussen:
 
 ```bash
 curl -X POST https://<jouw-worker>.workers.dev/api/ingest \
@@ -225,20 +208,18 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 - **Dag** — je ziet meteen alle eetmomenten met hun doel, nog leeg. Vul ze los in met
   "Genereer dit eetmoment", of laat de hele dag in één klik samenstellen. Per maaltijd
   kun je om een ander recept vragen (vergelijkbare macro's, ander gerecht), favoriet
-  maken of blokkeren. Onder elk ingrediënt staat het AH-product dat eraan gekoppeld is,
-  met een link naar de productpagina — dat is wat je in de winkel pakt. Onderaan het
-  dagtotaal tegenover je doel, en "Dag opslaan".
+  maken of blokkeren. Onderaan het dagtotaal tegenover je doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
-  ingrediënten over alle dagen bij elkaar opgeteld, met links naar het AH-product.
+  ingrediënten over alle dagen bij elkaar opgeteld, met een link naar het AH-product als
+  je dat ingrediënt zelf gekoppeld hebt.
 - **Database** — alles wat er in staat: recepten (met labels, voedingswaarde en welke
   nog niet doorgerekend zijn), producten, ingredient-naar-product-koppelingen en het
   scrape-archief. Doorzoekbaar, en de ruwe payload van elke scrape is op te vragen.
 
 Een tik op de naam van een recept — op een dagkaart, een keuzekaart of in de database —
-opent het receptvenster: alle ingrediënten met hun hoeveelheid, het gekoppelde
-AH-product en wat elke regel aan calorieën bijdraagt, plus de voedingswaarde per portie
-en voor het hele gerecht. Daar staat ook bij waar die cijfers vandaan komen: opgeteld
-uit de producten, of van AH zelf met de ontbrekende regels naar gewicht toegerekend.
+opent het receptvenster: alle ingrediënten met hun hoeveelheid en wat elke regel aan
+calorieën bijdraagt, plus de voedingswaarde per portie en voor het hele gerecht. Dat het
+totaal van AH komt en de verdeling per regel een schatting is, staat er ook bij.
 
 ### API
 
@@ -312,20 +293,13 @@ de ingebouwde paginastate in plaats van naar CSS-selectors — maar als resultat
 blijven, vraag dan eerst `GET /api/probe` op: die zegt welke stap stuk is. Daarna is
 `POST /api/reparse` je vangnet.
 
-Zolang er geen enkel recept plánbaar is, gaat élke automatische ronde naar het
-koppelen van ingrediënten in plaats van één op de drie: meer recepten ophalen heeft
-geen zin als de planner er toch niets mee kan.
-
 **Een worker mag maar een beperkt aantal verzoeken doen per aanroep.** Op het gratis
-plan zijn dat er 50, en die grens is makkelijker te raken dan hij klinkt: één recept
+plan zijn dat er 50, en die grens was makkelijker te raken dan hij klinkt: één recept
 met vijftien ingrediënten kostte vroeger dertig productlookups, waarna Cloudflare de
-hele ronde afkapte met "Too many subrequests" en élk resterend recept faalde. Daarom
-telt de scraper zijn verzoeken zelf mee (`AUTO_MAX_REQUESTS`, standaard 40) en stopt
-hij netjes vóór de grens — midden in een recept, zonder iets vast te leggen. Dat een
-recept nu in één keer wordt afgemaakt kost dus meer verzoeken per recept, maar het
-worden er snel minder: een product dat één keer opgezocht is, staat in de database en
-kost daarna niets. Bij de eerste rondes komen er een paar recepten binnen, daarna
-steeds meer.
+hele ronde afkapte met "Too many subrequests" en élk resterend recept faalde. Nu kost
+een recept één verzoek en past een hele ronde er ruim binnen. De scraper telt zijn
+verzoeken nog steeds zelf mee (`AUTO_MAX_REQUESTS`, standaard 40) en stopt netjes vóór
+de grens, zonder iets vast te leggen.
 
 **Eén kapot recept mag de automaat niet gijzelen.** Een recept dat structureel 403
 geeft (verwijderd, verhuisd) kwam vroeger elke ronde weer als eerste aan de beurt en
@@ -344,11 +318,12 @@ oplopende wachttijd. Die wachttijd staat op de cron bewust hoog (8 seconden,
 herkansen na anderhalve seconde liep gegarandeerd tegen dezelfde muur. Afkoelen gebeurt
 pas na twee rondes op rij met blokkades — één 403 is ruis.
 
-**Voedingswaarden komen van AH, maar de omrekening is niet exact.** Elk ingrediënt in
-de database heeft echte productcijfers per 100 g — anders was het recept er niet in
-gekomen. Wat wél een schatting blijft: stukgewichten ("1 ui = 110 g") en dichtheden
-zijn tabelwaarden, en welk product bij "milde olijfolie" hoort wordt op woorden
-gematcht. Een verkeerde koppeling corrigeer je met `POST /api/match`.
+**Het recepttotaal komt van AH; de verdeling per ingrediënt is een schatting.** Wat AH
+per portie opgeeft nemen we onveranderd over, en daar plant de app op. Zodra je naar één
+regel kijkt is het een aandeel naar gewicht: 100 g olijfolie krijgt in die rekensom
+evenveel als 100 g courgette, terwijl het in werkelijkheid een veelvoud is. Daarom
+schaalt een plan het gerecht alleen als geheel, en zijn de kcal per regel niet meer dan
+een indicatie. Stukgewichten ("1 ui = 110 g") en dichtheden zijn bovendien tabelwaarden.
 
 **De dagdoelen zijn een richtlijn, geen medisch advies.** Mifflin-St Jeor is een
 formule met spreiding tussen personen; het kcal-doel gaat nooit onder 1200.
@@ -359,7 +334,7 @@ authenticatie op. Zet de worker niet op een publieke URL die je met anderen deel
 ## Ontwikkelen
 
 ```bash
-npm test          # 185 tests, geen netwerk nodig
+npm test          # 236 tests, geen netwerk nodig
 npm run typecheck
 npm run dev
 ```

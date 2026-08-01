@@ -2,17 +2,17 @@ import { AhClient, isBudgetError } from "../ah/client";
 import type { Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
-import { coverageOf, firstIncomplete, resolveRecipe } from "../nutrition/resolve";
+import { recipeTotal } from "../nutrition/resolve";
 
 /**
  * Het scrapen zelf, los van de routes. Zowel de knoppen in de UI als de
  * automatische ronde uit `auto.ts` lopen hierlangs, zodat er maar één plek is
  * waar bepaald wordt hoe een recept binnenkomt en wordt weggeschreven.
  *
- * Eén regel bepaalt alles hier: een recept wordt in één keer helemaal afgemaakt
- * of het wordt niet opgeslagen. Geen titels zonder ingredienten, geen
- * ingredienten zonder voedingswaarde, geen totalen die later nog moeten worden
- * bijgewerkt. Wat in de database staat, kan de planner gebruiken.
+ * Eén regel bepaalt alles hier: een recept gaat er compleet in of helemaal niet.
+ * Compleet is sinds het loslaten van de productkoppeling eenvoudig geworden: een
+ * ingredientenlijst en AH's eigen voedingswaarde, allebei van dezelfde pagina.
+ * Wat in de database staat, kan de planner gebruiken.
  */
 
 export interface ScrapeEnv {
@@ -121,56 +121,43 @@ export interface IngestResult {
 export type CompleteOutcome = "opgeslagen" | "afgekeurd" | "overgeslagen";
 
 /**
- * Maakt één recept helemaal af, of keurt het af.
+ * Slaat één recept op, of keurt het af.
  *
- * Dit is de enige plek waar een recept de database in gaat, en de regel is
- * overal dezelfde: van elk ingredient moet de voedingswaarde bekend zijn. Dat
- * kan op drie manieren, in deze volgorde: een AH-product met een tabel per
- * 100 g, nul omdat het niets bijdraagt (water, zout — zie `isNutritionFree`),
- * of het deel van AH's eigen recepttotaal dat aan die regel toevalt (zie
- * `fillFromRecipeTotal`). Pas als geen van drieën lukt, gaat het recept eruit.
+ * De regel is er nog maar één: het recept heeft een ingredientenlijst én AH's
+ * eigen voedingswaarde. Dat laatste staat op vrijwel elke Allerhande-pagina, dus
+ * afkeuren is de uitzondering geworden in plaats van de regel.
  *
- * Recept en totaal gaan samen naar binnen; een van de twee zonder de ander is
- * precies het halffabricaat dat we niet willen.
- *
- * `cacheOnly` doet hetzelfde zonder één verzoek aan ah.nl — dat is wat
- * /api/reparse gebruikt: alleen recepten waarvan we alle producten al kennen.
+ * Er wordt geen product meer bij gezocht. Zie de kop van
+ * `src/nutrition/resolve.ts` voor waarom dat eruit is; hier telt vooral het
+ * gevolg: dit doet geen enkel extra verzoek aan ah.nl, dus alles wat een ronde
+ * kost is de receptpagina zelf.
  */
-export async function completeRecipe(
-  store: Store,
-  client: AhClient,
-  recipe: Recipe,
-  options: { cacheOnly?: boolean } = {},
-): Promise<CompleteOutcome> {
+export async function completeRecipe(store: Store, recipe: Recipe): Promise<CompleteOutcome> {
   if (recipe.ingredients.length === 0) {
     await store.skipRecipe(recipe.id, "geen ingredientenlijst op de pagina");
     return "afgekeurd";
   }
 
-  const resolved = await resolveRecipe(recipe, client, store, options);
-  const missing = firstIncomplete(resolved);
-  if (missing) {
-    // Zonder netwerk is "niet compleet" geen oordeel over het recept maar over
-    // wat we toevallig in de cache hebben; dan niets vastleggen.
-    if (options.cacheOnly) return "overgeslagen";
-    await store.skipRecipe(recipe.id, `geen voedingswaarde voor "${missing}"`);
+  const total = recipeTotal(recipe);
+  if (!total) {
+    await store.skipRecipe(recipe.id, "geen voedingswaarde op de receptpagina");
     await store.log("info", "ingest", `${recipe.title} afgekeurd`, {
       recept: recipe.id,
-      ingredient: missing,
-      reden: "geen product en geen voedingswaarde van AH zelf",
+      reden: "AH geeft geen voedingswaarde bij dit recept",
     });
     return "afgekeurd";
   }
 
-  const geschat = resolved.ingredients.filter((i) => i.nutrientSource === "geschat").length;
   await store.putRecipe(recipe);
-  await store.putNutrition(recipe.id, resolved.total, coverageOf(resolved), resolved.source);
+  // Dekking 1: de voedingswaarde is compleet en van AH zelf. Er valt niets meer
+  // te wegen aan hoeveel we ervan vonden — dat was de vraag toen het uit losse
+  // producten opgeteld werd.
+  await store.putNutrition(recipe.id, total, 1, "ah");
   await store.log("info", "ingest", `${recipe.title} opgeslagen`, {
     recept: recipe.id,
     ingredienten: recipe.ingredients.length,
-    kcal: Math.round(resolved.total.kcal ?? 0),
-    bron: resolved.source === "ah" ? "voedingswaarde van AH" : "opgeteld uit producten",
-    ...(geschat > 0 ? { geschatteRegels: geschat } : {}),
+    porties: recipe.servings,
+    kcal: Math.round(total.kcal ?? 0),
   });
   return "opgeslagen";
 }
@@ -188,11 +175,11 @@ export async function completeRecipeIds(
   const client = scrapeClient(env, store, clientOptions);
 
   for (const id of ids) {
-    if (client.budget.max - client.budget.used < 4) break;
+    if (client.budget.max - client.budget.used < 1) break;
     try {
       if (await store.isKnownRecipe(id)) continue;
       const recipe = await client.getRecipe(id);
-      if (recipe) await completeRecipe(store, client, recipe);
+      if (recipe) await completeRecipe(store, recipe);
     } catch {
       // volgende recept; dit draait buiten het antwoord om
     }
@@ -200,16 +187,16 @@ export async function completeRecipeIds(
 }
 
 /**
- * Eén ronde: zoeken, en elk gevonden recept helemaal afmaken.
+ * Eén ronde: zoeken, en elk gevonden recept opslaan.
  *
- * "Helemaal afmaken" betekent: van elk ingredient is de voedingswaarde bekend —
- * uit een AH-product, omdat het nul is, of uit AH's eigen recepttotaal (zie
- * `completeRecipe`). Lukt dat, dan gaan recept én totaal in één keer de database
- * in. Lukt het niet, dan komt het recept in `skipped_recipes` en wordt het nooit
- * opnieuw opgehaald.
+ * Eén verzoek per recept — de receptpagina, en verder niets. Daar staat alles
+ * op: de ingredienten én AH's voedingswaarde. Toen er per ingredient nog een
+ * product bij gezocht werd kostte één recept er vijftien tot dertig, en pasten
+ * er dus maar twee of drie in een ronde; nu passen er tientallen in hetzelfde
+ * budget.
  *
- * Raakt het verzoekbudget op midden in een recept, dan gebeurt er niets: niet
- * opslaan, niet afkeuren. Dat is het verschil tussen "past nu niet" en "kan niet".
+ * Raakt het verzoekbudget op, dan gebeurt er niets: niet opslaan, niet afkeuren.
+ * Dat is het verschil tussen "past nu niet" en "kan niet".
  */
 export async function ingestComplete(
   env: ScrapeEnv,
@@ -228,12 +215,11 @@ export async function ingestComplete(
   let blocked = 0;
   const errors: string[] = [];
 
-  // Vier verzoeken over is het minimum om een recept nog te kúnnen afmaken: de
-  // pagina zelf plus één onbekend ingredient.
+  // Eén verzoek over is genoeg voor nog een recept: de pagina zelf.
   const budgetLeft = () => client.budget.max - client.budget.used;
 
   for (const query of queries) {
-    if (budgetLeft() < 4 || added >= limit) break;
+    if (budgetLeft() < 2 || added >= limit) break;
 
     let found: Recipe[];
     try {
@@ -248,7 +234,7 @@ export async function ingestComplete(
     }
 
     for (const stub of found) {
-      if (budgetLeft() < 4 || added >= limit) break;
+      if (budgetLeft() < 1 || added >= limit) break;
       // Al bekend of al afgekeurd: kost geen enkel verzoek om over te slaan.
       if (await store.isKnownRecipe(stub.id)) continue;
 
@@ -260,7 +246,7 @@ export async function ingestComplete(
           continue;
         }
 
-        const outcome = await completeRecipe(store, client, recipe);
+        const outcome = await completeRecipe(store, recipe);
         if (outcome === "opgeslagen") added++;
         else if (outcome === "afgekeurd") rejected++;
       } catch (err) {

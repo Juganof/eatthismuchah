@@ -83,6 +83,35 @@ function boundsFor(name: string, opts: PlanOptions): { min: number; max: number 
   return { min: opts.minScale ?? 0.25, max: opts.maxScale ?? 3 };
 }
 
+/**
+ * Of dit recept alleen als geheel geschaald mag worden. Dat is zo zodra geen
+ * enkele regel een echt productlabel achter zich heeft — en dat is sinds het
+ * loslaten van de productkoppeling het normale geval.
+ */
+function uniformScaleOf(resolved: ResolvedRecipe): boolean {
+  return resolved.ingredients.every((ing) => ing.nutrientSource !== "product");
+}
+
+/**
+ * Schaalt het hele gerecht met één factor. Dat is dezelfde solver, maar dan met
+ * het recept als één post: de uitkomst is de portiegrootte waarmee dit gerecht
+ * het dichtst bij het doel komt, en die geldt voor elke regel gelijk.
+ */
+function solveUniform(
+  ingredients: SolverIngredient[],
+  targets: MacroTarget[],
+  opts: PlanOptions,
+): { scales: number[]; totals: Nutrients; cost: number } {
+  const whole: SolverIngredient = {
+    nutrients: sumNutrients(ingredients.map((i) => i.nutrients)),
+    min: opts.minScale ?? 0.25,
+    max: opts.maxScale ?? 3,
+  };
+  const result = solve([whole], targets, { shapePenalty: opts.shapePenalty });
+  const scale = result.scales[0] ?? 1;
+  return { scales: ingredients.map(() => scale), totals: result.totals, cost: result.cost };
+}
+
 export function planRecipe(
   resolved: ResolvedRecipe,
   targets: MacroTarget[],
@@ -102,7 +131,15 @@ export function planRecipe(
     return { nutrients: perPortionNutrients, ...boundsFor(ing.raw.name, opts) };
   });
 
-  const result = solve(solverIngredients, targets, { shapePenalty: opts.shapePenalty });
+  // Zonder productgegevens per ingredient is de voedingswaarde per regel een
+  // aandeel van AH's recepttotaal naar gewicht, geen meting. Regels dan los van
+  // elkaar schalen zou verzonnen precisie zijn: "minder olie" scheelt in die
+  // rekensom evenveel als "minder courgette", en dat is niet zo. Het hele
+  // gerecht schaalt daarom als één geheel — dat is precies wél waar AH's cijfer
+  // over gaat, want een halve portie is de helft van alles.
+  const result = uniformScaleOf(resolved)
+    ? solveUniform(solverIngredients, targets, opts)
+    : solve(solverIngredients, targets, { shapePenalty: opts.shapePenalty });
 
   const ingredients: PlannedIngredient[] = resolved.ingredients.map((ing, i) => {
     const scale = result.scales[i] ?? 1;

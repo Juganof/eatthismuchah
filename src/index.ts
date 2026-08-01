@@ -3,7 +3,7 @@ import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
 import { extractEmbeddedJson } from "./ah/scrape";
 
 import { Store, type SavedDayMeal } from "./db/queries";
-import { coverageOf, firstIncomplete, resolveRecipe } from "./nutrition/resolve";
+import { resolveRecipe } from "./nutrition/resolve";
 import { autoStatus, configFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
@@ -219,10 +219,9 @@ app.post("/api/reparse", async (c) => {
         failed.push(row.ref);
         continue;
       }
-      // cacheOnly: dit is een reparatie uit het archief, geen scrape. Alleen
-      // recepten waarvan we alle producten al kennen komen er compleet uit; de
-      // rest laat de gewone ronde later alsnog binnen.
-      const outcome = await completeRecipe(store, client, recipe, { cacheOnly: true });
+      // Dit is een reparatie uit het archief, geen scrape: alles wat nodig is
+      // staat in de bewaarde pagina, dus er gaat geen enkel verzoek naar ah.nl.
+      const outcome = await completeRecipe(store, recipe);
       await store.markRawParsed(row.id, outcome === "opgeslagen", null);
       if (outcome === "opgeslagen") recovered++;
       else failed.push(row.ref);
@@ -279,10 +278,10 @@ app.get("/api/recipe/:id", async (c) => {
   const recipe = known ?? (await client.getRecipe(id));
   if (!recipe) return c.json({ error: "recept niet gevonden" }, 404);
 
-  const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: known !== null });
+  const resolved = resolveRecipe(recipe);
   // Opslaan gaat via dezelfde regel als het scrapen: compleet of niet. Zo kan het
   // openen van een recept nooit een half recept in de database achterlaten.
-  const outcome = known ? "opgeslagen" : await completeRecipe(store, client, recipe);
+  const outcome = known ? "opgeslagen" : await completeRecipe(store, recipe);
 
   const servings = recipe.servings > 0 ? recipe.servings : 1;
   const perPortion: Record<string, number> = {};
@@ -293,13 +292,10 @@ app.get("/api/recipe/:id", async (c) => {
     servings,
     total: resolved.total,
     perPortion,
-    // "ah" betekent: de gaten zijn gevuld met AH's eigen cijfers van de
-    // receptpagina. Dat mag de gebruiker weten, want het is een schatting per
-    // regel — het totaal klopt, de verdeling erover is toegerekend.
+    // De cijfers komen van AH's receptpagina. Per regel is het een aandeel naar
+    // gewicht — het totaal klopt, de verdeling erover is toegerekend.
     nutritionSource: resolved.source,
-    coverage: Math.round(coverageOf(resolved) * 100) / 100,
     opgeslagen: outcome === "opgeslagen",
-    ontbreekt: firstIncomplete(resolved),
     ingredients: resolved.ingredients.map((i) => ({
       name: i.raw.name,
       quantity: i.raw.quantity,
@@ -329,9 +325,9 @@ app.post("/api/plan", async (c) => {
   const recipe = known ?? (await client.getRecipe(body.recipeId));
   if (!recipe) return c.json({ error: "recipe not found" }, 404);
 
-  const resolved = await resolveRecipe(recipe, client, store);
+  const resolved = resolveRecipe(recipe);
   // Nieuw recept? Dan gaat het via dezelfde compleet-of-niet-regel de database in.
-  if (!known) await completeRecipe(store, client, recipe);
+  if (!known) await completeRecipe(store, recipe);
 
   const plan = planRecipe(resolved, buildTargets(body), {
     portions: body.portions ?? 1,
@@ -364,9 +360,7 @@ app.post("/api/generate", async (c) => {
   for (const summary of shortlist) {
     const recipe = await store.getRecipe(summary.id);
     if (!recipe) continue;
-    // Nooit het netwerk op tijdens plannen: dit loopt over tientallen recepten
-    // en elk ongematcht ingredient zou een AH-zoekopdracht kosten.
-    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
+    const resolved = resolveRecipe(recipe);
     plans.push(
       planRecipe(resolved, targets, {
         portions: body.portions ?? 1,

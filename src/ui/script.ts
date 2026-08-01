@@ -253,35 +253,10 @@ function mealHead(meal) {
     + g(meal.targets.protein) + 'g eiwit</span></div>';
 }
 
-/** De link naar de AH-productpagina van één webshop-id. */
-function productHref(webshopId) {
-  return "https://www.ah.nl/producten/product/wi" + encodeURIComponent(webshopId);
-}
-
-/**
- * Het AH-product achter een ingredientregel. Dit is wat je in de winkel pakt,
- * dus het staat onder elke regel en niet weggestopt achter een uitklapper.
- */
-function productLine(i) {
-  if (!i.productTitle) {
-    return '<span class="prod-none">geen AH-product gekoppeld</span>';
-  }
-  const size = i.productSize ? ' &middot; ' + escapeHtml(i.productSize) : '';
-  const label = escapeHtml(i.productTitle) + size;
-  return i.productId
-    ? '<a class="prod" href="' + productHref(i.productId) + '" target="_blank" rel="noopener">' + label + '</a>'
-    : '<span class="prod-none">' + label + '</span>';
-}
-
-/** Eén ingredientregel: naam, het product eronder, en de hoeveelheid rechts. */
+/** Eén ingredientregel: naam links, hoeveelheid rechts. */
 function ingredientRow(i) {
-  // Drie verschillende dingen, en dat verschil is de moeite waard: geen cijfers,
-  // cijfers uit AH's eigen recepttotaal, of een echt productlabel.
-  const flag = i.unmatched
-    ? ' <span class="muted">(geen voedingswaarde)</span>'
-    : (i.nutrientSource === "geschat" ? ' <span class="muted">(schatting via AH)</span>' : '');
-  return '<div class="row"><span><span class="name">' + escapeHtml(i.name) + flag + '</span>'
-    + productLine(i) + '</span>'
+  const flag = i.unmatched ? ' <span class="muted">(geen voedingswaarde)</span>' : '';
+  return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span>'
     + '<span class="amt">' + amountFor(i) + '</span></div>';
 }
 
@@ -642,18 +617,16 @@ function recipeDetail(data) {
     const kcal = i.nutrients && i.nutrients.kcal !== undefined
       ? g(i.nutrients.kcal) + " kcal"
       : '<span class="warnish">geen voedingswaarde</span>';
-    return '<div class="row"><span><span class="name">' + escapeHtml(i.name) + '</span>'
-      + productLine({ productTitle: i.product, productId: i.productId, productSize: i.productSize })
-      + '</span><span class="amt">' + detailAmount(i) + '<br>' + kcal + '</span></div>';
+    return '<div class="row"><span>' + escapeHtml(i.name) + '</span>'
+      + '<span class="amt">' + detailAmount(i) + '<br>' + kcal + '</span></div>';
   }).join("");
 
-  // Waar de cijfers vandaan komen hoort erbij: AH's eigen opgave klopt als
-  // totaal, maar de verdeling over de regels is dan door ons toegerekend.
-  const geschat = data.ingredients.filter((i) => i.nutrientSource === "geschat").length;
+  // Waar de cijfers vandaan komen hoort erbij: het totaal is van AH, de
+  // verdeling over de regels is naar gewicht toegerekend en dus een schatting.
   const bron = data.nutritionSource === "ah"
-    ? '<p class="muted">Voedingswaarde van AH zelf; voor ' + plural(geschat, "ingredient", "ingredienten")
-      + ' zonder gekoppeld product is het aandeel naar gewicht toegerekend.</p>'
-    : '<p class="muted">Voedingswaarde opgeteld uit de gekoppelde AH-producten.</p>';
+    ? '<p class="muted">Voedingswaarde volgens AH. Per portie klopt het totaal; de kcal per '
+      + 'ingredi\u00ebnt is het aandeel naar gewicht, dus een schatting.</p>'
+    : '<p class="muted">AH geeft bij dit recept geen voedingswaarde.</p>';
 
   return '<h2>' + escapeHtml(r.title) + '</h2>'
     + '<p class="muted">' + plural(r.servings || data.servings, "portie", "porties") + ' &middot; '
@@ -664,9 +637,6 @@ function recipeDetail(data) {
     + macroChips(data.total)
     + rows
     + bron
-    + (data.ontbreekt
-      ? '<p class="note">Voor "' + escapeHtml(data.ontbreekt) + '" is geen voedingswaarde bekend.</p>'
-      : "")
     + '<div class="actions"><a href="' + r.url + '" target="_blank" rel="noopener">Bereiding op ah.nl</a></div>';
 }
 

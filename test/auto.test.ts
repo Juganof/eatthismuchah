@@ -52,16 +52,21 @@ const recipePage = (
     ...(nutrition ? { nutrition } : {}),
   })}</script></html>`;
 
+/** Wat AH standaard bij een recept zet: 300 kcal per portie, 2 porties. */
+const DEFAULT_NUTRITION = { calories: "300 kcal energie", proteinContent: "20 g eiwit" };
+
 interface StubOptions {
   keywords?: string;
   blockDetails?: boolean;
-  blockProducts?: boolean;
-  /** Ingredientregels van elk recept; standaard twee die een product hebben. */
+  /** Ingredientregels van elk recept. */
   ingredients?: string[];
   /** Welke recepten de zoekpagina teruggeeft. */
   ids?: string[];
-  /** De voedingswaarde per portie die AH zelf op de receptpagina zet. */
-  nutrition?: Record<string, string>;
+  /**
+   * De voedingswaarde per portie die AH zelf op de receptpagina zet. `null`
+   * bootst het zeldzame recept na dat AH niet doorgerekend heeft.
+   */
+  nutrition?: Record<string, string> | null;
 }
 
 /** Doet alsof ah.nl antwoordt: zoeken, recepten en producten, zonder netwerk. */
@@ -89,13 +94,13 @@ function stubAh(options: StubOptions = {}) {
       if (url.includes("/allerhande/recept/")) {
         if (options.blockDetails) return new Response("Access Denied", { status: 403 });
         const id = url.match(/recept\/(R-R\d+)/)?.[1] ?? "R-R1";
+        const nutrition = options.nutrition === undefined ? DEFAULT_NUTRITION : options.nutrition;
         return new Response(
-          recipePage(id, options.keywords ?? "ontbijt", ingredients, options.nutrition),
+          recipePage(id, options.keywords ?? "ontbijt", ingredients, nutrition ?? undefined),
           { status: 200 },
         );
       }
       if (url.includes("/product/search/")) {
-        if (options.blockProducts) return new Response("Access Denied", { status: 403 });
         const query = new URL(url).searchParams.get("query") ?? "";
         const hit = Object.entries(PRODUCTS).find(([name]) => query.includes(name));
         const products = hit ? [{ webshopId: hit[1].id, title: hit[1].title }] : [];
@@ -130,7 +135,7 @@ function envFor(): { DB: TestDb; AH_USER_AGENT: string } {
 const fastConfig = { ...DEFAULT_AUTO_CONFIG, minIntervalMs: 0, backoffMs: 0, batch: 2 };
 
 describe("een ronde", () => {
-  it("slaat alleen complete recepten op, met hun voedingswaarde", async () => {
+  it("slaat elk recept op met de voedingswaarde die AH zelf opgeeft", async () => {
     stubAh();
     const env = envFor();
     const store = new Store(env.DB);
@@ -141,18 +146,32 @@ describe("een ronde", () => {
     expect(result.added).toBeGreaterThan(0);
     expect(result.rejected).toBe(0);
 
-    // Elk opgeslagen recept heeft een echt totaal: 100 g havermout (375 kcal/100 g)
-    // plus 200 g kwark (57 kcal/100 g) = 375 + 114.
+    // 2 porties à 300 kcal; het recepttotaal is AH's opgave maal het aantal porties.
     const { rows } = await store.listRecipes();
     expect(rows).toHaveLength(result.added!);
     for (const row of rows) {
-      expect(row.nutrition?.kcal, row.title).toBeCloseTo(489, 0);
+      expect(row.nutrition?.kcal, row.title).toBeCloseTo(600, 0);
       expect(row.ingredientCount, row.title).toBe(2);
     }
   });
 
-  it("keurt een recept af als een ingredient nergens cijfers oplevert", async () => {
-    stubAh({ ingredients: ["100 g havermout", "2 middelgrote scharreleieren"] });
+  it("houdt een recept met ingredienten waar geen product bij te vinden is", async () => {
+    // Hierop sneuvelde vroeger bijna alles: courgette bestaat wel bij AH, maar
+    // de productpagina heeft geen voedingswaardetabel. Er wordt niet meer
+    // gezocht, dus het doet niet meer ter zake.
+    stubAh({ ingredients: ["1 courgette", "1 snoepkomkommer", "1 limoen"] });
+    const env = envFor();
+    const store = new Store(env.DB);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    expect(result.rejected).toBe(0);
+    expect(result.added).toBeGreaterThan(0);
+    expect(await store.countSkippedRecipes()).toBe(0);
+  });
+
+  it("keurt alleen af wat AH zelf niet doorgerekend heeft", async () => {
+    stubAh({ nutrition: null });
     const env = envFor();
     const store = new Store(env.DB);
 
@@ -165,50 +184,29 @@ describe("een ronde", () => {
     expect(await store.countSkippedRecipes()).toBe(result.rejected);
   });
 
-  it("houdt een recept dat AH zelf doorrekent, ook zonder product bij elke regel", async () => {
-    // Precies het geval waarop bijna alles sneuvelde: courgette bestaat wel bij
-    // AH, maar de productpagina heeft geen voedingswaardetabel. AH zet die
-    // cijfers wél op de receptpagina, en dat is genoeg.
-    stubAh({
-      ingredients: ["100 g havermout", "1 courgette"],
-      nutrition: { calories: "300 kcal", proteinContent: "20 g" },
-    });
+  it("kost één verzoek per recept, zodat er tientallen in een ronde passen", async () => {
+    const calls = stubAh({ ids: ["R-R101", "R-R102", "R-R103", "R-R104", "R-R105"] });
     const env = envFor();
-    const store = new Store(env.DB);
 
-    const result = await runAutoIngest(env, fastConfig);
+    const result = await runAutoIngest(env, { ...fastConfig, batch: 5 });
 
-    expect(result.rejected).toBe(0);
-    expect(result.added).toBeGreaterThan(0);
-    // 2 porties à 300 kcal: het totaal is AH's opgave, niet de 375 van de
-    // havermout alleen.
-    const { rows } = await store.listRecipes();
-    for (const row of rows) expect(row.nutrition?.kcal, row.title).toBeCloseTo(600, 0);
+    expect(result.added).toBe(5);
+    // Vijf receptpagina's plus de zoekpagina's — en verder niets. Toen er per
+    // ingredient een product bij gezocht werd waren dit er tegen de honderd.
+    expect(calls.filter((c) => c.includes("/product/"))).toHaveLength(0);
+    expect(calls.filter((c) => c.includes("/allerhande/recept/"))).toHaveLength(5);
   });
 
   it("haalt een afgekeurd recept nooit opnieuw op", async () => {
-    stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    stubAh({ nutrition: null });
     const env = envFor();
 
     await runAutoIngest(env, fastConfig);
-    const calls = stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    const calls = stubAh({ nutrition: null });
     await runAutoIngest(env, fastConfig);
 
     // Alleen de zoekpagina; de receptpagina's zijn al beoordeeld.
     expect(calls.filter((c) => c.includes("/allerhande/recept/"))).toHaveLength(0);
-  });
-
-  it("laat water en zout een recept niet blokkeren", async () => {
-    stubAh({ ingredients: ["100 g havermout", "200 ml water", "1 snuf zout"] });
-    const env = envFor();
-    const store = new Store(env.DB);
-
-    const result = await runAutoIngest(env, fastConfig);
-
-    expect(result.added).toBeGreaterThan(0);
-    // Water en zout leveren nul, dus het totaal is dat van de havermout alleen.
-    const { rows } = await store.listRecipes();
-    expect(rows[0]!.nutrition?.kcal).toBeCloseTo(375, 0);
   });
 
   it("haalt een recept dat al compleet is niet opnieuw op", async () => {
@@ -222,13 +220,13 @@ describe("een ronde", () => {
     expect(calls.filter((c) => c.includes("/allerhande/recept/"))).toHaveLength(0);
   });
 
-  it("legt niets vast als het verzoekbudget midden in een recept opraakt", async () => {
+  it("legt niets vast als het verzoekbudget al bij de zoekpagina opraakt", async () => {
     stubAh();
     const env = envFor();
     const store = new Store(env.DB);
 
-    // Genoeg voor de zoekpagina en de receptpagina, niet voor de producten.
-    await runAutoIngest(env, { ...fastConfig, maxRequests: 2 });
+    // Eén verzoek: dat is de zoekpagina, en dan is het op.
+    await runAutoIngest(env, { ...fastConfig, maxRequests: 1 });
 
     expect(await store.countRecipes()).toBe(0);
     // En niet afgekeurd: "past nu niet" is iets anders dan "kan niet".
@@ -436,8 +434,8 @@ describe("na een budgetstop", () => {
     const env = envFor();
     const store = new Store(env.DB);
 
-    // Ronde 1 komt niet verder dan de receptpagina.
-    await runAutoIngest(env, { ...fastConfig, maxRequests: 2 });
+    // Ronde 1 komt niet verder dan de zoekpagina.
+    await runAutoIngest(env, { ...fastConfig, maxRequests: 1 });
     expect(await store.countRecipes()).toBe(0);
 
     // Ronde 2 heeft ruimte genoeg en maakt hetzelfde recept alsnog compleet.
@@ -447,22 +445,22 @@ describe("na een budgetstop", () => {
 });
 
 describe("een fout is geen oordeel over het recept", () => {
-  it("keurt niets af als AH de productzoekopdracht blokkeert", async () => {
-    stubAh({ blockProducts: true });
+  it("keurt niets af als AH de receptpagina blokkeert", async () => {
+    stubAh({ blockDetails: true });
     const env = envFor();
     const store = new Store(env.DB);
 
     const result = await runAutoIngest(env, fastConfig);
 
-    // Dit was de bug: een 403 kwam als "geen product" terug, waarna een prima
-    // recept voorgoed werd afgekeurd. Een blokkade is "later nog eens".
+    // Een blokkade is "later nog eens", geen oordeel: zo'n recept voorgoed
+    // afkeuren omdat Akamai net dwarslag is precies wat we niet willen.
     expect(result.rejected).toBe(0);
     expect(await store.countSkippedRecipes()).toBe(0);
     expect(result.blocked).toBeGreaterThan(0);
   });
 
   it("probeert een recept opnieuw zodra de blokkade voorbij is", async () => {
-    stubAh({ blockProducts: true });
+    stubAh({ blockDetails: true });
     const env = envFor();
     const store = new Store(env.DB);
     await runAutoIngest(env, fastConfig);
@@ -476,18 +474,18 @@ describe("een fout is geen oordeel over het recept", () => {
 
 describe("een afkeuring verloopt", () => {
   it("probeert het na twee weken opnieuw", async () => {
-    stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    stubAh({ nutrition: null });
     const env = envFor();
     const store = new Store(env.DB);
     await runAutoIngest(env, fastConfig);
     expect(await store.countSkippedRecipes()).toBeGreaterThan(0);
 
     // Verse afkeuring: niet opnieuw ophalen.
-    let calls = stubAh({ ingredients: ["1 onvindbaar ingredient"] });
+    let calls = stubAh({ nutrition: null });
     await runAutoIngest(env, fastConfig);
     expect(calls.filter((c) => c.includes("/allerhande/recept/"))).toHaveLength(0);
 
-    // Twee weken later wél: misschien vindt de matcher het inmiddels wel.
+    // Twee weken later wél: misschien heeft AH het recept alsnog doorgerekend.
     await db!
       .prepare("UPDATE skipped_recipes SET at = ?")
       .bind(Date.now() - 15 * 24 * 60 * 60 * 1000)

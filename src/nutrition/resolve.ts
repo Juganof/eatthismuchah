@@ -1,20 +1,29 @@
-import type { AhClient } from "../ah/client";
-import type { Store } from "../db/queries";
 import {
   NUTRIENT_KEYS,
   type Nutrients,
-  type Product,
-  type RawIngredient,
   type Recipe,
   type ResolvedIngredient,
   type ResolvedRecipe,
 } from "../ah/types";
-import { bestMatch, headTermFor, scoreMatch, searchTermFor, tokenize } from "./match";
 import { toGrams } from "./units";
 
 /**
- * Turns a scraped recipe into per-ingredient nutrition: each line is converted to
- * grams, matched to an AH product, and multiplied by that product's per-100g values.
+ * Zet een gescrapet recept om in cijfers waar de planner mee kan rekenen.
+ *
+ * De bron is AH's eigen voedingswaarde per portie, die op elke receptpagina
+ * staat. Dat is hun berekening over het hele gerecht en dus het meest
+ * betrouwbare wat er te krijgen is.
+ *
+ * Er wordt niet meer per ingredient een AH-product bij gezocht. Dat is er
+ * bewust uit: het matchen op naam raadde te vaak mis ("middelgroot scharrelei"
+ * tegen "AH Scharreleieren", "snoepkomkommer" tegen niets), veel verse producten
+ * hebben bij AH helemaal geen voedingswaardetabel, en één misser keurde een
+ * verder prima recept voorgoed af. Bovendien kostte het per recept vijftien tot
+ * dertig verzoeken aan ah.nl, terwijl de receptpagina zelf er maar één kost — en
+ * met dat verschil passen er per ronde tientallen recepten in plaats van een
+ * handjevol.
+ *
+ * Deze module doet daarom geen enkele aanroep meer: hij is een pure berekening.
  */
 
 export function scaleNutrients(per100g: Nutrients, grams: number): Nutrients {
@@ -44,271 +53,102 @@ export function sumNutrients(items: Nutrients[]): Nutrients {
   return out;
 }
 
-export type MatchOutcome = "matched" | "no-match";
-
-/**
- * Zoekt het product voor één ingredientnaam en onthoudt de uitkomst — gedeeld
- * door plannen (via `resolveProduct`, hieronder) en de achtergrond-enrichment
- * (`enrichIngredientMatches` in `src/ingest/pipeline.ts`). Gooit door bij een
- * netwerk- of blokkadefout, zodat de aanroeper die apart kan tellen; alleen een
- * bevestigd "geen product gevonden" wordt als negatieve match onthouden.
- */
-export async function lookupIngredientMatch(
-  name: string,
-  client: AhClient,
-  store: Store,
-): Promise<{ outcome: MatchOutcome; product: Product | null; score: number }> {
-  let candidates = await client.searchProducts(searchTermFor(name), 8);
-  let match = bestMatch(name, candidates);
-
-  // Tweede poging op de kernnaam. "middelgroot scharrelei" tegen "AH
-  // Scharreleieren" scoort 0,38 — net onder de drempel, puur omdat "middelgroot"
-  // nergens op slaat. Op "scharrelei" alleen is het 0,60. Er wordt dan ook op de
-  // kernnaam gescoord: we hebben er bewust op gezocht, dus de rest van de regel
-  // afstraffen zou het antwoord opnieuw wegdrukken. Alleen als de eerste poging
-  // faalde, dus hooguit één extra verzoek per ingredientnaam.
-  const head = match ? null : headTermFor(name);
-  if (head) {
-    const extra = await client.searchProducts(head, 8);
-    const better = bestMatch(head, extra);
-    if (better) {
-      candidates = extra;
-      match = better;
-    }
+/** De voedingswaarde van het hele recept, uit AH's opgave per portie. */
+export function recipeTotal(recipe: Recipe): Nutrients | null {
+  const perServing = recipe.nutritionPerServing;
+  if (!perServing || perServing.kcal === undefined) return null;
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const out: Nutrients = {};
+  for (const key of NUTRIENT_KEYS) {
+    const value = perServing[key];
+    if (value !== undefined) out[key] = value * servings;
   }
-
-  if (!match) {
-    // Waaróm er niets matchte is het enige spoor dat we hebben als een recept
-    // hierop sneuvelt: aan de drempel, aan de zoekterm, of aan AH zelf.
-    await store.log("info", "match", `"${name}" geen match`, {
-      kandidaten: candidates.length,
-      titels: candidates.slice(0, 3).map((c) => c.title),
-      beste: Math.round(bestScoreAmong(head ?? name, candidates) * 100) / 100,
-      ...(head ? { ookGezochtOp: head } : {}),
-    });
-    await store.putMatch(name, null, 0);
-    return { outcome: "no-match", product: null, score: 0 };
-  }
-
-  // Het zoekresultaat draagt titel en verpakking al; alleen de voedingswaarde
-  // ontbreekt, en die komt van de productpagina. Eén verzoek dus, geen twee.
-  let full = await store.getProduct(match.product.webshopId);
-  if (!full) {
-    const per100g = await client.getProductNutrition(match.product.webshopId);
-    full = per100g.kcal !== undefined
-      ? { ...match.product, per100g }
-      // Staat er niets op de pagina, dan alsnog de detail-API proberen: die
-      // leverde de voedingswaarde vroeger wel, en als AH dat herstelt willen we
-      // niet vastzitten aan de dure route.
-      : await client.getProduct(match.product.webshopId);
-    if (full) await store.putProduct(full);
-  }
-  // Geen bruikbaar productdetail: niet als negatieve match onthouden, want dit is
-  // net zo goed "probeer het later nog eens" als een netwerkfout.
-  if (!full) return { outcome: "no-match", product: null, score: 0 };
-
-  await store.putMatch(name, full.webshopId, match.score);
-  return { outcome: "matched", product: full, score: match.score };
-}
-
-/** De hoogste score onder de kandidaten, ook als die onder de drempel bleef. */
-function bestScoreAmong(name: string, candidates: Product[]): number {
-  let best = 0;
-  for (const candidate of candidates) best = Math.max(best, scoreMatch(name, candidate.title));
-  return best;
+  return out;
 }
 
 /**
- * Haalt het product op waar AH de receptregel zelf aan koppelt. Geen zoekopdracht,
- * geen scorefunctie: één detailaanroep (of nul, als we het product al kennen).
- * Score 1, want er valt hier niets te raden.
- */
-export async function lookupLinkedProduct(
-  name: string,
-  productId: string,
-  client: AhClient,
-  store: Store,
-): Promise<Product | null> {
-  let product = await store.getProduct(productId);
-  if (!product) {
-    product = await client.getProduct(productId);
-    if (product) await store.putProduct(product);
-  }
-  if (!product) return null;
-  await store.putMatch(name, product.webshopId, 1);
-  return product;
-}
-
-/**
- * Zoekt het product voor één receptregel, cache eerst.
+ * Rekent het recepttotaal naar gewicht toe aan de losse ingredienten.
  *
- * Fouten gaan hier bewust omhoog in plaats van als "geen product" te eindigen.
- * Dat verschil is duur gebleken: toen een blokkade of een opgeraakt verzoekbudget
- * hier stilletjes `null` werd, keurde `firstIncomplete` een prima recept af — en
- * afgekeurd is voorgoed. Een fout betekent "later nog eens proberen"; alleen een
- * geslaagde zoekopdracht die niets bruikbaars oplevert is een echt oordeel.
+ * De solver werkt per ingredient, dus die heeft per regel een getal nodig — het
+ * recepttotaal alleen is niet genoeg. Naar gewicht verdelen is daarvoor de
+ * eerlijkste verdeelsleutel die zonder productgegevens te maken is: 400 g kip
+ * krijgt vier keer zoveel als 100 g, en een handvol peterselie bijna niets.
+ *
+ * Het is nadrukkelijk een verdeling en geen meting. Wat er per regel staat is
+ * een aandeel; wat optelt tot AH's cijfer is het geheel. Daarom mag het plan een
+ * recept ook alleen als geheel schalen — zie `planRecipe`.
+ *
+ * Water, zout en peper krijgen niets: die dragen echt nul bij, en meetellen zou
+ * hun aandeel van de rest afsnoepen.
  */
-async function resolveProduct(
-  ingredient: RawIngredient,
-  client: AhClient,
-  store: Store,
-  cacheOnly = false,
-): Promise<{ product: Product | null; score: number }> {
-  // AH's eigen koppeling wint van alles wat in de cache staat: die kan uit een
-  // eerdere zoekronde komen en dus een gok zijn.
-  if (ingredient.productId) {
-    const linked = await store.getProduct(ingredient.productId);
-    if (linked) return { product: linked, score: 1 };
-    if (!cacheOnly) {
-      const product = await lookupLinkedProduct(
-        ingredient.name,
-        ingredient.productId,
-        client,
-        store,
-      );
-      if (product) return { product, score: 1 };
-    }
-  }
+export function resolveRecipe(recipe: Recipe): ResolvedRecipe {
+  const total = recipeTotal(recipe);
 
-  const cached = await store.getMatch(ingredient.name);
-  if (cached !== undefined) {
-    if (cached.webshopId === null) return { product: null, score: 0 };
-    const product = await store.getProduct(cached.webshopId);
-    if (product) return { product, score: cached.score };
-  }
-
-  // Bij plannen mag er niets naar ah.nl: dat zijn tientallen zoekopdrachten per
-  // recept maal het aantal kandidaten, en met de verplichte pauzes ertussen loopt
-  // dat in de minuten. Onbekend is dan gewoon onbekend.
-  if (cacheOnly) return { product: null, score: 0 };
-
-  const { product, score } = await lookupIngredientMatch(ingredient.name, client, store);
-  return { product, score };
-}
-
-/**
- * `cacheOnly` maakt dit een pure databaseoperatie: geen enkele aanroep naar
- * ah.nl. Dat is wat het plannen gebruikt — daar worden tientallen recepten
- * doorgerekend en is wachten op het netwerk geen optie.
- */
-export async function resolveRecipe(
-  recipe: Recipe,
-  client: AhClient,
-  store: Store,
-  options: { cacheOnly?: boolean } = {},
-): Promise<ResolvedRecipe> {
-  const ingredients: ResolvedIngredient[] = [];
-
-  for (const raw of recipe.ingredients) {
+  const ingredients: ResolvedIngredient[] = recipe.ingredients.map((raw) => {
     const { grams, source } = toGrams(raw);
-    const { product, score } = await resolveProduct(raw, client, store, options.cacheOnly);
-    const hasNutrition = product !== null && product.per100g.kcal !== undefined;
-    ingredients.push({
+    return {
       raw,
       grams,
-      product,
+      product: null,
       gramsSource: source,
-      matchScore: score,
-      nutrients: hasNutrition ? scaleNutrients(product.per100g, grams) : {},
-      nutrientSource: hasNutrition ? "product" : isNutritionFree(raw.name) ? "nul" : "onbekend",
-    });
-  }
+      matchScore: 0,
+      nutrients: {},
+      nutrientSource: isNutritionFree(raw.name) ? "nul" : total ? "geschat" : "onbekend",
+    };
+  });
 
-  const source = fillFromRecipeTotal(recipe, ingredients) ? "ah" : "products";
+  if (total) {
+    const shares = ingredients.filter((i) => i.nutrientSource === "geschat");
+    const totalGrams = shares.reduce((sum, i) => sum + i.grams, 0);
+    for (const ingredient of shares) {
+      const share = totalGrams > 0 ? ingredient.grams / totalGrams : 1 / shares.length;
+      for (const key of NUTRIENT_KEYS) {
+        const value = total[key];
+        if (value !== undefined) ingredient.nutrients[key] = value * share;
+      }
+    }
+  }
 
   return {
     recipe,
     ingredients,
-    total: sumNutrients(ingredients.map((i) => i.nutrients)),
-    source,
+    // Het totaal blijft AH's opgave, ook als er geen enkele regel iets kreeg
+    // (een recept van alleen water bestaat niet, maar afronding hoort nooit een
+    // recept stiekem lichter te maken dan AH zegt).
+    total: total ?? {},
+    source: total ? "ah" : "products",
   };
 }
 
 /**
- * Vult de gaten met AH's eigen voedingswaarde van de receptpagina.
- *
- * Waarom dit er is: de eis "elk ingredient een AH-product met een voedingswaarde­-
- * tabel" leek streng maar was vooral onhaalbaar. Juist de gewoonste dingen —
- * courgette, een scharrelei, een sjalot, verse kruiden — staan bij AH als
- * versproduct zonder tabel, en één zo'n regel keurde een verder prima recept
- * voorgoed af. In de praktijk sneuvelde daar bijna alles op.
- *
- * AH zet op de receptpagina zelf de voedingswaarde per portie, en die is
- * nauwkeuriger dan wat wij uit losse producten optellen: het is hun eigen
- * berekening over het hele gerecht. Het verschil tussen dat totaal en wat de
- * gematchte producten al verklaren, is precies wat de ontbrekende regels samen
- * bijdragen. Dat verschil wordt naar gewicht over die regels verdeeld.
- *
- * Zo blijft de rekenmodel-kant intact — de solver heeft per ingredient cijfers
- * nodig, niet alleen een recepttotaal — en telt het geheel op tot wat AH zegt.
- * Geeft AH geen voedingswaarde, dan verandert er niets en blijft het oude,
- * strenge oordeel staan.
- *
- * Geeft `true` terug als er daadwerkelijk iets is bijgevuld.
+ * Woorden die niets over het ingredient zelf zeggen: bereidingswijze,
+ * hoedanigheid, vulwoorden. Ze staan de vergelijking met de vrijstellingslijst
+ * hieronder in de weg — "een snuf zout" is gewoon zout.
  */
-export function fillFromRecipeTotal(
-  recipe: Recipe,
-  ingredients: ResolvedIngredient[],
-): boolean {
-  const perServing = recipe.nutritionPerServing;
-  if (!perServing || perServing.kcal === undefined) return false;
+const NOISE = new Set([
+  "verse", "vers", "rijpe", "rijp", "grote", "groot", "kleine", "klein", "fijne", "fijn",
+  "gesneden", "gesnipperde", "gesnipperd", "geraspte", "geraspt", "gehakte", "gehakt",
+  "gepelde", "gepeld", "geschilde", "geschild", "blokjes", "reepjes", "plakjes", "ringen",
+  "in", "van", "de", "het", "een", "of", "en", "met", "naar", "smaak", "extra",
+  "biologische", "bio", "ongezouten", "gezouten", "magere", "volle", "halfvolle",
+  "ah", "huismerk", "voor", "erbij", "eventueel", "optioneel", "stuks", "stuk",
+]);
 
-  const gaps = ingredients.filter((i) => i.nutrientSource === "onbekend");
-  if (gaps.length === 0) return false;
-
-  // AH schrijft per portie; alles hier rekent op het hele recept.
-  const servings = recipe.servings > 0 ? recipe.servings : 1;
-  const matched = sumNutrients(ingredients.map((i) => i.nutrients));
-
-  // Naar gewicht verdelen, want een handvol peterselie hoort niet evenveel te
-  // krijgen als 400 g kip. Zonder bruikbare grammen is gelijk verdelen het enige
-  // eerlijke alternatief.
-  const totalGrams = gaps.reduce((sum, i) => sum + i.grams, 0);
-  const shareOf = (ingredient: ResolvedIngredient) =>
-    totalGrams > 0 ? ingredient.grams / totalGrams : 1 / gaps.length;
-
-  for (const key of NUTRIENT_KEYS) {
-    const whole = perServing[key];
-    if (whole === undefined) continue;
-    // Verklaren de producten al meer dan AH's totaal, dan valt er niets te
-    // verdelen: negatieve calorieen bestaan niet en aftrekken zou de gematchte
-    // regels ongeloofwaardig maken.
-    const rest = whole * servings - (matched[key] ?? 0);
-    if (rest <= 0) continue;
-    for (const ingredient of gaps) ingredient.nutrients[key] = rest * shareOf(ingredient);
-  }
-
-  for (const ingredient of gaps) ingredient.nutrientSource = "geschat";
-  return true;
+export function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ") // drop parenthetical asides
+    .split(/[^a-zàâäçéèêëîïôöûüù]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 2 && !NOISE.has(t));
 }
 
 /**
- * Share of the recipe's weight that we found nutrition for. This is the honest
- * confidence signal: 12 matched herbs and one unmatched 400 g chicken is bad
- * coverage even though 12 of 13 lines matched.
+ * Ingredienten waarvoor geen voedingswaarde hoeft te bestaan.
  *
- * Een regel die uit AH's eigen recepttotaal is bijgevuld telt hier mee: die
- * cijfers komen van AH zelf en zijn daarmee niet minder waard dan een
- * productlabel. Of er ook een product bij hoort is een andere vraag — die stelt
- * de boodschappenlijst, niet de voedingswaarde.
- */
-export function coverageOf(resolved: ResolvedRecipe): number {
-  let total = 0;
-  let known = 0;
-  for (const ing of resolved.ingredients) {
-    total += ing.grams;
-    if (isComplete(ing)) known += ing.grams;
-  }
-  return total > 0 ? known / total : 0;
-}
-
-/**
- * Ingredienten waarvoor geen product hoeft te bestaan.
- *
- * Water, zout en peper staan in bijna elk recept en leveren geen calorieen. Zonder
- * deze uitzondering zou de eis "elk ingredient een echt product" vrijwel elk recept
- * afkeuren, en dan houd je een lege database over in plaats van een strenge.
- * Nul is hier geen schatting maar de waarheid.
+ * Water, zout en peper staan in bijna elk recept en leveren niets. Ze uit de
+ * verdeling houden scheelt niet alleen nauwkeurigheid: het voorkomt ook dat een
+ * plan "minder water" voorstelt om calorieen te besparen.
  */
 const NUTRITION_FREE = new Set([
   "water", "kraanwater", "ijswater", "ijsblokjes", "ijsklontjes", "ijs",
@@ -329,36 +169,13 @@ const AMOUNT_WORDS = new Set([
 ]);
 
 /**
- * Of dit ingredient zonder product als compleet mag gelden. Vergelijkt op hele
- * woorden via dezelfde tokenizer als de matcher, zodat "peperoni" geen peper is
- * en "water" in "kokoswater" niet meetelt.
+ * Of dit ingredient geen voedingswaarde hoort te hebben. Vergelijkt op hele
+ * woorden, zodat "peperoni" geen peper is en "water" in "kokoswater" niet
+ * meetelt.
  */
 export function isNutritionFree(name: string): boolean {
   const words = tokenize(name).filter((word) => !AMOUNT_WORDS.has(word));
   if (words.length === 0) return false;
   // Elk overgebleven woord moet vrijgesteld zijn: "water met citroen" is dat niet.
   return words.every((word) => NUTRITION_FREE.has(word));
-}
-
-/**
- * Een ingredient telt als opgelost als het cijfers heeft, of nul hoort te zijn.
- * Een regel die uit AH's recepttotaal is bijgevuld ("geschat") telt mee: die
- * heeft echte cijfers, alleen niet uit een productlabel.
- */
-export function isComplete(ingredient: ResolvedIngredient): boolean {
-  if (ingredient.nutrientSource === "nul" || ingredient.nutrientSource === "geschat") return true;
-  if (isNutritionFree(ingredient.raw.name)) return true;
-  return ingredient.product !== null && ingredient.product.per100g.kcal !== undefined;
-}
-
-/**
- * Het eerste ingredient dat dit recept onbruikbaar maakt, of null als alles klopt.
- * De naam gaat mee de log en `skipped_recipes` in: zo is achteraf te zien waaróp
- * een recept sneuvelde, en of de vrijstellingslijst een woord mist.
- */
-export function firstIncomplete(resolved: ResolvedRecipe): string | null {
-  for (const ingredient of resolved.ingredients) {
-    if (!isComplete(ingredient)) return ingredient.raw.name;
-  }
-  return null;
 }

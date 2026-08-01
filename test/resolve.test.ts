@@ -1,87 +1,110 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { AhClient, resetEndpointState } from "../src/ah/client";
-import { Store } from "../src/db/queries";
-import {
-  fillFromRecipeTotal,
-  firstIncomplete,
-  isNutritionFree,
-  lookupIngredientMatch,
-} from "../src/nutrition/resolve";
-import type { ResolvedRecipe } from "../src/ah/types";
-import { createTestDb, type TestDb } from "./helpers/d1";
+import { describe, expect, it } from "vitest";
+import { isNutritionFree, recipeTotal, resolveRecipe, tokenize } from "../src/nutrition/resolve";
+import type { Nutrients, Recipe } from "../src/ah/types";
 
 /**
- * Twee dingen liggen hier vast: dat een ingredientnaam bij het juiste product
- * uitkomt en dat dat onthouden wordt, en de regel die bepaalt of een recept
- * compleet genoeg is om opgeslagen te worden.
+ * Sinds het loslaten van de productkoppeling is dit pure rekenkunde: AH's
+ * voedingswaarde per portie in, cijfers per ingredient uit. Wat hier vastligt is
+ * dat het totaal precies blijft wat AH zegt, en dat de verdeling erover naar
+ * gewicht gaat.
  */
 
-let db: TestDb | null = null;
-afterEach(() => {
-  db?.close();
-  db = null;
-  vi.unstubAllGlobals();
-  resetEndpointState();
+const recipe = (over: Partial<Recipe> = {}): Recipe => ({
+  id: "R-R1",
+  title: "Testrecept",
+  url: "https://www.ah.nl/allerhande/recept/R-R1",
+  servings: 1,
+  imageUrl: null,
+  ingredients: [],
+  ...over,
 });
 
-/** Doet alsof AH één product kent: "AH Magere kwark". */
-function stubAhProducts(options: { searchFails?: boolean; titles?: string[] } = {}) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/mobile-auth/")) {
-        return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
-      }
-      if (url.includes("/product/search/")) {
-        // 403 op de zoekopdracht zelf is Akamai's tempo-blokkade, geen "niets
-        // gevonden": die hoort door te slaan naar de aanroeper.
-        if (options.searchFails) return new Response("Access Denied", { status: 403 });
-        const titles = options.titles ?? ["AH Magere kwark"];
-        return new Response(
-          JSON.stringify({
-            products: titles.map((title, i) => ({ webshopId: 123 + i, title })),
-          }),
-          { status: 200 },
-        );
-      }
-      if (url.includes("/producten/product/wi")) {
-        return new Response(
-          '<table data-testid="nutrition-table"><tr><td>Energie</td><td>57 kcal</td></tr>' +
-            "<tr><td>Eiwitten</td><td>10 g</td></tr></table>",
-          { status: 200 },
-        );
-      }
-      return new Response("{}", { status: 200 });
-    }),
-  );
-}
+const gram = (name: string, grams: number) => ({ name, quantity: grams, unit: "g" });
 
-/** Eén opgelost ingredient, met of zonder product erachter. */
-function ingredient(name: string, per100g: Record<string, number> | null) {
-  return {
-    raw: { name, quantity: 100, unit: "g" },
-    grams: 100,
-    product: per100g ? { webshopId: "1", title: name, salesUnitSize: null, per100g } : null,
-    gramsSource: "explicit" as const,
-    matchScore: per100g ? 1 : 0,
-    nutrients: per100g ?? {},
-    nutrientSource: per100g ? ("product" as const) : ("onbekend" as const),
-  };
-}
+describe("recipeTotal", () => {
+  it("rekent AH's cijfers per portie om naar het hele recept", () => {
+    const total = recipeTotal(recipe({ servings: 4, nutritionPerServing: { kcal: 320, protein: 14 } }));
+    expect(total).toEqual({ kcal: 1280, protein: 56 });
+  });
 
-const resolvedWith = (...ingredients: ReturnType<typeof ingredient>[]): ResolvedRecipe => ({
-  recipe: {
-    id: "R-R1",
-    title: "Testrecept",
-    url: "https://www.ah.nl/allerhande/recept/R-R1",
-    servings: 1,
-    imageUrl: null,
-    ingredients: ingredients.map((i) => i.raw),
-  },
-  ingredients,
-  total: {},
-  source: "products",
+  it("geeft niets terug zonder calorieen, want daar valt niet mee te plannen", () => {
+    expect(recipeTotal(recipe({ nutritionPerServing: { protein: 14 } }))).toBeNull();
+    expect(recipeTotal(recipe({ nutritionPerServing: null }))).toBeNull();
+  });
+});
+
+describe("resolveRecipe", () => {
+  const courgetteFrittata = recipe({
+    servings: 4,
+    ingredients: [gram("courgette", 600), gram("olijfolie", 40), gram("scharrelei", 250)],
+    nutritionPerServing: { kcal: 320, protein: 14, fat: 27, carbs: 5 },
+  });
+
+  it("verdeelt het recepttotaal naar gewicht over de ingredienten", () => {
+    const resolved = resolveRecipe(courgetteFrittata);
+    const kcal = resolved.ingredients.map((i) => i.nutrients.kcal!);
+    // 890 g in totaal; de courgette is 600 daarvan, dus 600/890 van 1280 kcal.
+    expect(kcal[0]).toBeCloseTo((1280 * 600) / 890, 5);
+    expect(kcal[1]).toBeCloseTo((1280 * 40) / 890, 5);
+    expect(kcal.reduce((a, b) => a + b, 0)).toBeCloseTo(1280, 5);
+  });
+
+  it("houdt het totaal exact op wat AH zegt", () => {
+    const resolved = resolveRecipe(courgetteFrittata);
+    expect(resolved.total).toEqual({ kcal: 1280, protein: 56, fat: 108, carbs: 20 });
+    expect(resolved.source).toBe("ah");
+  });
+
+  it("markeert elke regel als toegerekend, niet als gemeten", () => {
+    const resolved = resolveRecipe(courgetteFrittata);
+    for (const ingredient of resolved.ingredients) {
+      expect(ingredient.nutrientSource).toBe("geschat");
+      expect(ingredient.product).toBeNull();
+    }
+  });
+
+  it("geeft water en zout niets, en snoept hun aandeel dus niet van de rest af", () => {
+    const resolved = resolveRecipe(
+      recipe({
+        ingredients: [gram("havermout", 100), gram("water", 200), { name: "snuf zout", quantity: null, unit: null }],
+        nutritionPerServing: { kcal: 375 },
+      }),
+    );
+    expect(resolved.ingredients[0]!.nutrients.kcal).toBeCloseTo(375, 5);
+    expect(resolved.ingredients[1]!.nutrients).toEqual({});
+    expect(resolved.ingredients[1]!.nutrientSource).toBe("nul");
+    expect(resolved.ingredients[2]!.nutrients).toEqual({});
+  });
+
+  it("laat de macro's weg die AH zelf niet noemt", () => {
+    // AH geeft zelden vezels op. Dan nul invullen zou een recept vezelvrij
+    // laten lijken; niets invullen laat de solver het gewoon niet meewegen.
+    const resolved = resolveRecipe(
+      recipe({ ingredients: [gram("havermout", 100)], nutritionPerServing: { kcal: 375, protein: 13 } }),
+    );
+    expect(resolved.ingredients[0]!.nutrients.fiber).toBeUndefined();
+    expect(resolved.total.fiber).toBeUndefined();
+  });
+
+  it("laat de regels leeg als AH geen voedingswaarde geeft", () => {
+    const resolved = resolveRecipe(recipe({ ingredients: [gram("havermout", 100)] }));
+    expect(resolved.total).toEqual({} as Nutrients);
+    expect(resolved.ingredients[0]!.nutrientSource).toBe("onbekend");
+  });
+
+  it("valt terug op gelijk verdelen als geen enkele regel gewicht heeft", () => {
+    const resolved = resolveRecipe(
+      recipe({
+        // Zonder hoeveelheid schat `toGrams` een gewicht, dus dit is een
+        // randgeval dat in de praktijk nauwelijks voorkomt; delen door nul mag
+        // er hoe dan ook niet uit komen.
+        ingredients: [{ name: "iets", quantity: 0, unit: "g" }, { name: "iets anders", quantity: 0, unit: "g" }],
+        nutritionPerServing: { kcal: 100 },
+      }),
+    );
+    expect(resolved.ingredients[0]!.nutrients.kcal).toBeCloseTo(50, 5);
+    expect(resolved.ingredients[1]!.nutrients.kcal).toBeCloseTo(50, 5);
+  });
 });
 
 describe("isNutritionFree", () => {
@@ -101,227 +124,8 @@ describe("isNutritionFree", () => {
   });
 });
 
-describe("firstIncomplete", () => {
-  it("noemt het ingredient waarop het recept sneuvelt", () => {
-    const resolved = resolvedWith(
-      ingredient("havermout", { kcal: 375 }),
-      ingredient("middelgroot scharrelei", null),
-    );
-    expect(firstIncomplete(resolved)).toBe("middelgroot scharrelei");
-  });
-
-  it("vindt niets mis aan een recept met alleen echte cijfers en water", () => {
-    const resolved = resolvedWith(
-      ingredient("havermout", { kcal: 375 }),
-      ingredient("water", null),
-    );
-    expect(firstIncomplete(resolved)).toBeNull();
-  });
-
-  it("keurt een product zonder calorieen af, want dat is geen cijfer", () => {
-    const resolved = resolvedWith(ingredient("mysterie", {}));
-    expect(firstIncomplete(resolved)).toBe("mysterie");
-  });
-});
-
-describe("fillFromRecipeTotal", () => {
-  /** Hetzelfde recept, maar mét de voedingswaarde die AH er zelf bij zet. */
-  const withAhNutrition = (
-    resolved: ResolvedRecipe,
-    perServing: Record<string, number>,
-    servings = 1,
-  ): ResolvedRecipe => ({
-    ...resolved,
-    recipe: { ...resolved.recipe, servings, nutritionPerServing: perServing },
-  });
-
-  it("vult het gat met wat AH's totaal nog niet verklaart", () => {
-    // 100 g havermout is 375 kcal; AH zegt 500 voor het hele recept, dus de
-    // courgette waar geen product bij te vinden was is de resterende 125.
-    const resolved = withAhNutrition(
-      resolvedWith(ingredient("havermout", { kcal: 375 }), ingredient("courgette", null)),
-      { kcal: 500 },
-    );
-    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(true);
-    expect(resolved.ingredients[1]!.nutrients.kcal).toBeCloseTo(125);
-    expect(resolved.ingredients[1]!.nutrientSource).toBe("geschat");
-    // En daarmee is het recept bruikbaar in plaats van afgekeurd.
-    expect(firstIncomplete(resolved)).toBeNull();
-  });
-
-  it("verdeelt het restant naar gewicht over de ontbrekende regels", () => {
-    const light = ingredient("peterselie", null);
-    const heavy = ingredient("kip", null);
-    heavy.grams = 300; // 100 g peterselie tegen 300 g kip
-    const resolved = withAhNutrition(resolvedWith(light, heavy), { kcal: 400 });
-
-    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
-    expect(light.nutrients.kcal).toBeCloseTo(100);
-    expect(heavy.nutrients.kcal).toBeCloseTo(300);
-  });
-
-  it("rekent AH's cijfers per portie om naar het hele recept", () => {
-    const resolved = withAhNutrition(resolvedWith(ingredient("courgette", null)), { kcal: 250 }, 4);
-    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
-    expect(resolved.ingredients[0]!.nutrients.kcal).toBeCloseTo(1000);
-  });
-
-  it("trekt niets af als de producten AH's totaal al overschrijden", () => {
-    const resolved = withAhNutrition(
-      resolvedWith(ingredient("havermout", { kcal: 375 }), ingredient("courgette", null)),
-      { kcal: 300 },
-    );
-    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
-    expect(resolved.ingredients[0]!.nutrients.kcal).toBe(375);
-    expect(resolved.ingredients[1]!.nutrients.kcal).toBeUndefined();
-  });
-
-  it("doet niets zonder voedingswaarde van AH, en houdt het oordeel streng", () => {
-    const resolved = resolvedWith(
-      ingredient("havermout", { kcal: 375 }),
-      ingredient("courgette", null),
-    );
-    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(false);
-    expect(firstIncomplete(resolved)).toBe("courgette");
-  });
-
-  it("laat een recept waarvan alles al matcht met rust", () => {
-    const resolved = withAhNutrition(resolvedWith(ingredient("havermout", { kcal: 375 })), {
-      kcal: 500,
-    });
-    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(false);
-    expect(resolved.ingredients[0]!.nutrients.kcal).toBe(375);
-  });
-});
-
-describe("lookupIngredientMatch", () => {
-  it("matches, stores the product, and remembers the match", async () => {
-    stubAhProducts();
-    db = createTestDb();
-    const store = new Store(db);
-    const client = new AhClient("test", undefined, { minIntervalMs: 0, backoffMs: 0 });
-
-    const result = await lookupIngredientMatch("kwark", client, store);
-
-    expect(result.outcome).toBe("matched");
-    expect(result.product?.webshopId).toBe("123");
-    expect(await store.getMatch("kwark")).toEqual({ webshopId: "123", score: expect.any(Number) });
-  });
-
-  it("rethrows on a blocked search instead of swallowing it, so enrichment can count it", async () => {
-    stubAhProducts({ searchFails: true });
-    db = createTestDb();
-    const store = new Store(db);
-    const client = new AhClient("test", undefined, { minIntervalMs: 0, backoffMs: 0, maxRetries: 0 });
-
-    await expect(lookupIngredientMatch("kwark", client, store)).rejects.toThrow();
-    // Geen negatieve match onthouden voor iets dat gewoon een blokkade was.
-    expect(await store.getMatch("kwark")).toBeUndefined();
-  });
-});
-
-describe("terugval op de webshoppagina als de mobiele API dichtzit", () => {
-  it("zoekt via www.ah.nl zodra het anonieme token geweigerd wordt", async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        calls.push(url);
-        // Dit is wat de echte app overkwam: het token werd geweigerd, waarna
-        // elke productzoekopdracht faalde en niets meer gekoppeld werd.
-        if (url.includes("/mobile-auth/")) return new Response("Access Denied", { status: 403 });
-        if (url.includes("/producten/zoeken")) {
-          return new Response(
-            '<a href="/producten/product/wi123456/ah-magere-kwark">kwark</a>',
-            { status: 200 },
-          );
-        }
-        if (url.includes("/producten/product/wi")) {
-          return new Response(
-            '<table data-testid="nutrition-table"><tr><td>Energie</td><td>57 kcal</td></tr>' +
-              "<tr><td>Eiwitten</td><td>10 g</td></tr></table>",
-            { status: 200 },
-          );
-        }
-        return new Response("{}", { status: 200 });
-      }),
-    );
-
-    const db = createTestDb();
-    try {
-      const store = new Store(db);
-      const client = new AhClient("test", undefined, { minIntervalMs: 0, maxRetries: 0 });
-      const result = await lookupIngredientMatch("magere kwark", client, store);
-
-      expect(result.outcome).toBe("matched");
-      expect(result.product?.webshopId).toBe("123456");
-      expect(result.product?.per100g.kcal).toBe(57);
-      expect(calls.some((c) => c.includes("/producten/zoeken"))).toBe(true);
-    } finally {
-      db.close();
-    }
-  });
-});
-
-describe("als de volledige naam niets oplevert", () => {
-  it("zoekt nog één keer op de kernnaam", async () => {
-    const queries: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/mobile-auth/")) {
-          return new Response(JSON.stringify({ access_token: "test-token" }), { status: 200 });
-        }
-        if (url.includes("/product/search/")) {
-          const query = new URL(url).searchParams.get("query") ?? "";
-          queries.push(query);
-          // Zoals AH zich gedraagt: op de hele receptregel niets bruikbaars, op
-          // het kernwoord wel.
-          const products = query === "scharrelei"
-            ? [{ webshopId: 5, title: "AH Scharreleieren" }]
-            : [{ webshopId: 9, title: "AH Roomboter" }];
-          return new Response(JSON.stringify({ products }), { status: 200 });
-        }
-        if (url.includes("/producten/product/wi")) {
-          return new Response(
-            '<table data-testid="nutrition-table"><tr><td>Energie</td><td>139 kcal</td></tr>' +
-              "<tr><td>Eiwitten</td><td>12 g</td></tr></table>",
-            { status: 200 },
-          );
-        }
-        return new Response("{}", { status: 200 });
-      }),
-    );
-
-    db = createTestDb();
-    const store = new Store(db);
-    const client = new AhClient("test", undefined, { minIntervalMs: 0 });
-
-    const result = await lookupIngredientMatch("middelgroot scharrelei", client, store);
-
-    expect(queries).toEqual(["middelgroot scharrelei", "scharrelei"]);
-    expect(result.outcome).toBe("matched");
-    expect(result.product?.title).toBe("AH Scharreleieren");
-  });
-
-  it("legt vast wat het zag toen er niets matchte", async () => {
-    stubAhProducts({ searchFails: false, titles: ["Snelfilterkoffie", "Koffiebonen"] });
-    db = createTestDb();
-    const store = new Store(db);
-    const client = new AhClient("test", undefined, { minIntervalMs: 0 });
-
-    await lookupIngredientMatch("sjalot", client, store);
-
-    // Zonder deze regel is een afgekeurd recept een dood spoor: je ziet wel
-    // dát het misging, niet waaróp.
-    const logs = await store.recentLogs(10);
-    const miss = logs.find((l) => l.message.includes("geen match"));
-    expect(miss).toBeDefined();
-    expect(JSON.parse(miss!.detail!)).toMatchObject({
-      kandidaten: 2,
-      titels: expect.arrayContaining(["Snelfilterkoffie"]),
-    });
+describe("tokenize", () => {
+  it("laat bereidingswoorden en tussenzinnen vallen", () => {
+    expect(tokenize("2 rijpe trostomaten, in blokjes (geschild)")).toEqual(["trostomaten"]);
   });
 });

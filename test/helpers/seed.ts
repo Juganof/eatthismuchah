@@ -2,10 +2,11 @@ import { Store } from "../../src/db/queries";
 import type { Nutrients, Recipe } from "../../src/ah/types";
 
 /**
- * Vult een testdatabase met recepten die volledig doorgerekend zijn: product,
- * match en voedingswaarde staan er allemaal in. Daardoor doet `resolveRecipe`
- * geen enkele netwerkaanroep en kan de dagplanner in de tests draaien zoals in
- * productie, alleen zonder ah.nl.
+ * Vult een testdatabase met recepten zoals ze na een scrape in productie staan:
+ * ingredienten plus AH's eigen voedingswaarde per portie. De `per100g`-waarden
+ * hieronder zijn alleen het rekengereedschap waarmee die voedingswaarde wordt
+ * opgebouwd — de app kent ze niet meer, want er wordt geen product meer bij een
+ * ingredient gezocht.
  */
 
 export interface SeedIngredient {
@@ -25,6 +26,19 @@ export interface SeedRecipe {
 export async function seedRecipes(store: Store, recipes: SeedRecipe[]): Promise<void> {
   for (const seed of recipes) {
     const servings = seed.servings ?? 1;
+    const totals: Nutrients = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
+    for (const ingredient of seed.ingredients) {
+      const factor = ingredient.grams / 100;
+      for (const key of ["kcal", "protein", "carbs", "fat", "fiber"] as const) {
+        totals[key] = (totals[key] ?? 0) + (ingredient.per100g[key] ?? 0) * factor;
+      }
+    }
+
+    const perServing: Nutrients = {};
+    for (const key of ["kcal", "protein", "carbs", "fat", "fiber"] as const) {
+      perServing[key] = (totals[key] ?? 0) / servings;
+    }
+
     const recipe: Recipe = {
       id: seed.id,
       title: seed.title,
@@ -32,26 +46,10 @@ export async function seedRecipes(store: Store, recipes: SeedRecipe[]): Promise<
       servings,
       imageUrl: null,
       ingredients: seed.ingredients.map((i) => ({ name: i.name, quantity: i.grams, unit: "g" })),
+      nutritionPerServing: perServing,
     };
     await store.putRecipe(recipe);
-
-    const totals: Nutrients = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
-    for (const ingredient of seed.ingredients) {
-      const webshopId = `wi-${ingredient.name}`;
-      await store.putProduct({
-        webshopId,
-        title: ingredient.name,
-        salesUnitSize: "500 g",
-        per100g: ingredient.per100g,
-      });
-      await store.putMatch(ingredient.name, webshopId, 1);
-
-      const factor = ingredient.grams / 100;
-      for (const key of ["kcal", "protein", "carbs", "fat", "fiber"] as const) {
-        totals[key] = (totals[key] ?? 0) + (ingredient.per100g[key] ?? 0) * factor;
-      }
-    }
-    await store.putNutrition(seed.id, totals, 1);
+    await store.putNutrition(seed.id, totals, 1, "ah");
   }
 }
 

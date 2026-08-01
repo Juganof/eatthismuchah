@@ -150,7 +150,7 @@ describe("log en wissen", () => {
 });
 
 describe("/api/recipe/:id", () => {
-  it("laat de ingredienten met hun AH-product en voedingswaarde zien", async () => {
+  it("laat de ingredienten zien met hun aandeel in de voedingswaarde", async () => {
     const { Store } = await import("../src/db/queries");
     const { FOODS, seedRecipes } = await import("./helpers/seed");
     await seedRecipes(new Store(db), [
@@ -169,14 +169,17 @@ describe("/api/recipe/:id", () => {
       servings: number;
       perPortion: { kcal: number };
       total: { kcal: number };
-      ingredients: { name: string; product: string | null; productUrl: string | null }[];
+      nutritionSource: string;
+      ingredients: { name: string; nutrients: { kcal?: number }; nutrientSource: string }[];
     };
 
     expect(body.servings).toBe(2);
     expect(body.ingredients.map((i) => i.name)).toEqual(["kwark", "havermout"]);
-    // Het product hoort erbij: dat is wat je in de winkel pakt.
-    expect(body.ingredients[0]!.product).toBe("kwark");
-    expect(body.ingredients[0]!.productUrl).toContain("/producten/product/wi");
+    // Elke regel krijgt zijn aandeel naar gewicht, en dat telt op tot het geheel.
+    const som = body.ingredients.reduce((sum, i) => sum + (i.nutrients.kcal ?? 0), 0);
+    expect(som).toBeCloseTo(body.total.kcal, 5);
+    expect(body.ingredients[0]!.nutrientSource).toBe("geschat");
+    expect(body.nutritionSource).toBe("ah");
     // Per portie is de helft van het hele recept.
     expect(body.perPortion.kcal).toBeCloseTo(body.total.kcal / 2, 5);
   });

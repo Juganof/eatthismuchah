@@ -132,12 +132,6 @@ export const styles = `
   .meal-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .meal-head .slot { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 
-  /* Het product onder een ingredientregel: ondergeschikt aan de regel zelf,
-     maar wel aanklikbaar — dit is wat je in de winkel of in je mandje legt. */
-  .prod { font-size: .78rem; text-decoration: none; }
-  .prod-none { font-size: .78rem; color: var(--muted); }
-  .row .name { display: block; }
-
   /* Een receptnaam die je kunt aantikken. Ziet eruit als tekst, gedraagt zich
      als een knop, zodat toetsenbord en schermlezer het ook snappen. */
   .linklike {

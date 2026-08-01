@@ -10,9 +10,10 @@ import { MOMENTS, MOMENT_QUERIES, ingestComplete, type ScrapeEnv } from "./pipel
  * er wél door, en leveren over een dag genomen veel meer recepten op.
  *
  * Elke ronde doet hetzelfde: zoeken op de term die aan de beurt is, en elk
- * gevonden recept helemaal afmaken — inclusief de voedingswaarde van elk
- * ingredient. Wat niet compleet te krijgen is, wordt afgekeurd en nooit meer
- * opgehaald. Er zijn dus geen halffabricaten om later te repareren.
+ * gevonden recept opslaan met de voedingswaarde die AH er zelf bij zet. Dat kost
+ * één verzoek per recept, dus er passen er tientallen in een ronde. Een recept
+ * dat AH niet doorgerekend heeft wordt afgekeurd en nooit meer opgehaald; er
+ * zijn dus geen halffabricaten om later te repareren.
  *
  * Verder houdt hij zich in: een dagbudget zodat we niet eindeloos blijven
  * hameren, en een afkoelperiode zodra AH ons alsnog blokkeert.
@@ -61,7 +62,11 @@ export interface AutoConfig {
 }
 
 export const DEFAULT_AUTO_CONFIG: AutoConfig = {
-  batch: 8,
+  // Eén verzoek per recept, dus dit past ruim binnen het budget van veertig:
+  // de zoekpagina plus dertig receptpagina's. Toen er per ingredient nog een
+  // product bij gezocht werd was acht al te veel gevraagd en kwamen er in de
+  // praktijk twee of drie doorheen.
+  batch: 30,
   dailyMax: 250,
   minIntervalMs: 700,
   cooldownMs: 30 * 60 * 1000,

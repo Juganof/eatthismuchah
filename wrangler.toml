@@ -27,9 +27,10 @@ INGEST_QUERIES = "kip,zalm,pasta,vegetarisch,rijst,salade"
 INGEST_LIMIT = "40"
 
 # --- automatisch bijvullen -------------------------------------------------
-# Recepten per automatische ronde. Klein houden: met 700 ms tussen verzoeken
-# duurt een ronde van 8 recepten ruim 5 seconden, en dat past comfortabel.
-AUTO_BATCH = "8"
+# Recepten per automatische ronde. Eén verzoek per recept, dus dit is vooral
+# begrensd door de tijd: met 700 ms ertussen duurt een ronde van 30 recepten
+# ruim 20 seconden, en dat past binnen een cron-aanroep.
+AUTO_BATCH = "30"
 # Bovengrens per dag, zodat de automaat niet eindeloos doorhamert.
 AUTO_DAILY_MAX = "250"
 # Minimale rust tussen twee verzoeken aan ah.nl.

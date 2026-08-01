@@ -183,9 +183,9 @@ async function planCandidates(
     const recipe = await store.getRecipe(candidate.id);
     if (!recipe || recipe.ingredients.length === 0) continue;
 
-    // Plannen mag nooit het netwerk op: er worden tientallen recepten
-    // doorgerekend en elk ongematcht ingredient zou een AH-zoekopdracht kosten.
-    const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: true });
+    // Puur rekenwerk: de voedingswaarde staat bij het recept, dus plannen raakt
+    // ah.nl niet aan.
+    const resolved = resolveRecipe(recipe);
 
     // Kost van het recept zoals het geschreven staat, vóór herschalen — puur uit
     // het gecachte recepttotaal, dus geen extra netwerk of solve nodig.
