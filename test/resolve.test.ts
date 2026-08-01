@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AhClient, resetEndpointState } from "../src/ah/client";
 import { Store } from "../src/db/queries";
-import { firstIncomplete, isNutritionFree, lookupIngredientMatch } from "../src/nutrition/resolve";
+import {
+  fillFromRecipeTotal,
+  firstIncomplete,
+  isNutritionFree,
+  lookupIngredientMatch,
+} from "../src/nutrition/resolve";
 import type { ResolvedRecipe } from "../src/ah/types";
 import { createTestDb, type TestDb } from "./helpers/d1";
 
@@ -61,6 +66,7 @@ function ingredient(name: string, per100g: Record<string, number> | null) {
     gramsSource: "explicit" as const,
     matchScore: per100g ? 1 : 0,
     nutrients: per100g ?? {},
+    nutrientSource: per100g ? ("product" as const) : ("onbekend" as const),
   };
 }
 
@@ -75,6 +81,7 @@ const resolvedWith = (...ingredients: ReturnType<typeof ingredient>[]): Resolved
   },
   ingredients,
   total: {},
+  source: "products",
 });
 
 describe("isNutritionFree", () => {
@@ -114,6 +121,76 @@ describe("firstIncomplete", () => {
   it("keurt een product zonder calorieen af, want dat is geen cijfer", () => {
     const resolved = resolvedWith(ingredient("mysterie", {}));
     expect(firstIncomplete(resolved)).toBe("mysterie");
+  });
+});
+
+describe("fillFromRecipeTotal", () => {
+  /** Hetzelfde recept, maar mét de voedingswaarde die AH er zelf bij zet. */
+  const withAhNutrition = (
+    resolved: ResolvedRecipe,
+    perServing: Record<string, number>,
+    servings = 1,
+  ): ResolvedRecipe => ({
+    ...resolved,
+    recipe: { ...resolved.recipe, servings, nutritionPerServing: perServing },
+  });
+
+  it("vult het gat met wat AH's totaal nog niet verklaart", () => {
+    // 100 g havermout is 375 kcal; AH zegt 500 voor het hele recept, dus de
+    // courgette waar geen product bij te vinden was is de resterende 125.
+    const resolved = withAhNutrition(
+      resolvedWith(ingredient("havermout", { kcal: 375 }), ingredient("courgette", null)),
+      { kcal: 500 },
+    );
+    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(true);
+    expect(resolved.ingredients[1]!.nutrients.kcal).toBeCloseTo(125);
+    expect(resolved.ingredients[1]!.nutrientSource).toBe("geschat");
+    // En daarmee is het recept bruikbaar in plaats van afgekeurd.
+    expect(firstIncomplete(resolved)).toBeNull();
+  });
+
+  it("verdeelt het restant naar gewicht over de ontbrekende regels", () => {
+    const light = ingredient("peterselie", null);
+    const heavy = ingredient("kip", null);
+    heavy.grams = 300; // 100 g peterselie tegen 300 g kip
+    const resolved = withAhNutrition(resolvedWith(light, heavy), { kcal: 400 });
+
+    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
+    expect(light.nutrients.kcal).toBeCloseTo(100);
+    expect(heavy.nutrients.kcal).toBeCloseTo(300);
+  });
+
+  it("rekent AH's cijfers per portie om naar het hele recept", () => {
+    const resolved = withAhNutrition(resolvedWith(ingredient("courgette", null)), { kcal: 250 }, 4);
+    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
+    expect(resolved.ingredients[0]!.nutrients.kcal).toBeCloseTo(1000);
+  });
+
+  it("trekt niets af als de producten AH's totaal al overschrijden", () => {
+    const resolved = withAhNutrition(
+      resolvedWith(ingredient("havermout", { kcal: 375 }), ingredient("courgette", null)),
+      { kcal: 300 },
+    );
+    fillFromRecipeTotal(resolved.recipe, resolved.ingredients);
+    expect(resolved.ingredients[0]!.nutrients.kcal).toBe(375);
+    expect(resolved.ingredients[1]!.nutrients.kcal).toBeUndefined();
+  });
+
+  it("doet niets zonder voedingswaarde van AH, en houdt het oordeel streng", () => {
+    const resolved = resolvedWith(
+      ingredient("havermout", { kcal: 375 }),
+      ingredient("courgette", null),
+    );
+    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(false);
+    expect(firstIncomplete(resolved)).toBe("courgette");
+  });
+
+  it("laat een recept waarvan alles al matcht met rust", () => {
+    const resolved = withAhNutrition(resolvedWith(ingredient("havermout", { kcal: 375 })), {
+      kcal: 500,
+    });
+    expect(fillFromRecipeTotal(resolved.recipe, resolved.ingredients)).toBe(false);
+    expect(resolved.ingredients[0]!.nutrients.kcal).toBe(375);
   });
 });
 

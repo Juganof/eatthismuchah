@@ -36,7 +36,12 @@ const nutritionPage = (kcal: number, eiwit: number) =>
      <tr><td>Eiwitten</td><td>${eiwit} g</td></tr>
    </table></html>`;
 
-const recipePage = (id: string, keywords: string, ingredients: string[]) =>
+const recipePage = (
+  id: string,
+  keywords: string,
+  ingredients: string[],
+  nutrition?: Record<string, string>,
+) =>
   `<html><script type="application/ld+json">${JSON.stringify({
     "@type": "Recipe",
     name: "Testrecept " + id,
@@ -44,6 +49,7 @@ const recipePage = (id: string, keywords: string, ingredients: string[]) =>
     recipeYield: "2",
     keywords,
     recipeIngredient: ingredients,
+    ...(nutrition ? { nutrition } : {}),
   })}</script></html>`;
 
 interface StubOptions {
@@ -54,6 +60,8 @@ interface StubOptions {
   ingredients?: string[];
   /** Welke recepten de zoekpagina teruggeeft. */
   ids?: string[];
+  /** De voedingswaarde per portie die AH zelf op de receptpagina zet. */
+  nutrition?: Record<string, string>;
 }
 
 /** Doet alsof ah.nl antwoordt: zoeken, recepten en producten, zonder netwerk. */
@@ -81,7 +89,10 @@ function stubAh(options: StubOptions = {}) {
       if (url.includes("/allerhande/recept/")) {
         if (options.blockDetails) return new Response("Access Denied", { status: 403 });
         const id = url.match(/recept\/(R-R\d+)/)?.[1] ?? "R-R1";
-        return new Response(recipePage(id, options.keywords ?? "ontbijt", ingredients), { status: 200 });
+        return new Response(
+          recipePage(id, options.keywords ?? "ontbijt", ingredients, options.nutrition),
+          { status: 200 },
+        );
       }
       if (url.includes("/product/search/")) {
         if (options.blockProducts) return new Response("Access Denied", { status: 403 });
@@ -140,7 +151,7 @@ describe("een ronde", () => {
     }
   });
 
-  it("keurt een recept af zodra één ingredient geen product heeft", async () => {
+  it("keurt een recept af als een ingredient nergens cijfers oplevert", async () => {
     stubAh({ ingredients: ["100 g havermout", "2 middelgrote scharreleieren"] });
     const env = envFor();
     const store = new Store(env.DB);
@@ -152,6 +163,27 @@ describe("een ronde", () => {
     // Niets half opgeslagen: geen recept, geen voedingswaarde.
     expect(await store.countRecipes()).toBe(0);
     expect(await store.countSkippedRecipes()).toBe(result.rejected);
+  });
+
+  it("houdt een recept dat AH zelf doorrekent, ook zonder product bij elke regel", async () => {
+    // Precies het geval waarop bijna alles sneuvelde: courgette bestaat wel bij
+    // AH, maar de productpagina heeft geen voedingswaardetabel. AH zet die
+    // cijfers wél op de receptpagina, en dat is genoeg.
+    stubAh({
+      ingredients: ["100 g havermout", "1 courgette"],
+      nutrition: { calories: "300 kcal", proteinContent: "20 g" },
+    });
+    const env = envFor();
+    const store = new Store(env.DB);
+
+    const result = await runAutoIngest(env, fastConfig);
+
+    expect(result.rejected).toBe(0);
+    expect(result.added).toBeGreaterThan(0);
+    // 2 porties à 300 kcal: het totaal is AH's opgave, niet de 375 van de
+    // havermout alleen.
+    const { rows } = await store.listRecipes();
+    for (const row of rows) expect(row.nutrition?.kcal, row.title).toBeCloseTo(600, 0);
   });
 
   it("haalt een afgekeurd recept nooit opnieuw op", async () => {

@@ -148,3 +148,36 @@ describe("log en wissen", () => {
     expect(logs.rows[0]!.message).toContain("database gewist");
   });
 });
+
+describe("/api/recipe/:id", () => {
+  it("laat de ingredienten met hun AH-product en voedingswaarde zien", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { FOODS, seedRecipes } = await import("./helpers/seed");
+    await seedRecipes(new Store(db), [
+      {
+        id: "R-R900",
+        title: "Kwark met havermout",
+        servings: 2,
+        ingredients: [
+          { name: "kwark", grams: 300, per100g: FOODS.kwark! },
+          { name: "havermout", grams: 80, per100g: FOODS.havermout! },
+        ],
+      },
+    ]);
+
+    const body = (await (await fetchWorker("/api/recipe/R-R900")).json()) as {
+      servings: number;
+      perPortion: { kcal: number };
+      total: { kcal: number };
+      ingredients: { name: string; product: string | null; productUrl: string | null }[];
+    };
+
+    expect(body.servings).toBe(2);
+    expect(body.ingredients.map((i) => i.name)).toEqual(["kwark", "havermout"]);
+    // Het product hoort erbij: dat is wat je in de winkel pakt.
+    expect(body.ingredients[0]!.product).toBe("kwark");
+    expect(body.ingredients[0]!.productUrl).toContain("/producten/product/wi");
+    // Per portie is de helft van het hele recept.
+    expect(body.perPortion.kcal).toBeCloseTo(body.total.kcal / 2, 5);
+  });
+});

@@ -1,4 +1,12 @@
-import { adminCard, browseTab, dayTab, profileTab, slotsTab, weekTab } from "./markup";
+import {
+  adminCard,
+  browseTab,
+  dayTab,
+  profileTab,
+  recipeDialog,
+  slotsTab,
+  weekTab,
+} from "./markup";
 import { script } from "./script";
 import { styles } from "./styles";
 
@@ -43,6 +51,7 @@ ${weekTab()}
 ${browseTab()}
 ${adminCard()}
 </main>
+${recipeDialog()}
 <script>${script}</script>
 </body>
 </html>`;

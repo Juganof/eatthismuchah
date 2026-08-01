@@ -64,6 +64,8 @@ export class Store {
         servings: number;
         image_url: string | null;
         ingredients: string;
+        keywords: string | null;
+        nutrition_per_serving: string | null;
       }>();
     if (!row) return null;
     return {
@@ -73,6 +75,11 @@ export class Store {
       servings: row.servings,
       imageUrl: row.image_url,
       ingredients: JSON.parse(row.ingredients) as RawIngredient[],
+      keywords: parseJson<string[]>(row.keywords, []),
+      // Zonder dit zou het plannen (dat alleen uit de database leest) de gaten
+      // niet meer kunnen vullen die het scrapen wél gevuld had, en een recept
+      // ineens veel te weinig calorieen tellen.
+      nutritionPerServing: parseJson<Nutrients | null>(row.nutrition_per_serving, null),
     };
   }
 
@@ -86,8 +93,8 @@ export class Store {
     const now = Date.now();
     await this.db
       .prepare(
-        `INSERT INTO recipes (id, title, url, servings, image_url, ingredients, fetched_at, first_seen_at, tags, keywords)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO recipes (id, title, url, servings, image_url, ingredients, fetched_at, first_seen_at, tags, keywords, nutrition_per_serving)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -105,6 +112,9 @@ export class Store {
              WHEN json_array_length(excluded.keywords) > 0 THEN excluded.keywords
              ELSE recipes.keywords
            END,
+           -- Een herscrape zonder voedingswaarde mag een eerder gevonden blok
+           -- niet wegvagen; dat is dezelfde regel als voor de ingredienten.
+           nutrition_per_serving = COALESCE(excluded.nutrition_per_serving, recipes.nutrition_per_serving),
            fetched_at = excluded.fetched_at,
            first_seen_at = COALESCE(recipes.first_seen_at, excluded.first_seen_at)`,
       )
@@ -119,6 +129,7 @@ export class Store {
         now,
         JSON.stringify(deriveTags(recipe)),
         JSON.stringify(recipe.keywords ?? []),
+        recipe.nutritionPerServing ? JSON.stringify(recipe.nutritionPerServing) : null,
       )
       .run();
   }

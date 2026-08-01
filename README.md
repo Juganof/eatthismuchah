@@ -36,10 +36,11 @@ tientallen kandidaten maal tien ingredienten maal de verplichte pauze ertussen l
 genereren van een dag in de minuten. Plannen draait nu in `cacheOnly`-modus en is puur
 een databaseoperatie — een dag staat er in een fractie van een seconde.
 
-**Alleen echte cijfers per ingrediënt.** De planner hoeft nergens meer op te wegen of
-te schatten: elk recept in de database heeft voedingswaarde per ingrediënt, anders was
-het er niet in gekomen. Er was hier ooit een modus die het hele gerecht met één factor
-schaalde (×1,7 op alles) omdat alleen AH's portietotaal bekend was; die is eruit.
+**Cijfers per ingrediënt, altijd.** De planner hoeft nergens meer op te wegen: elk
+recept in de database heeft voedingswaarde per ingrediënt, anders was het er niet in
+gekomen — desnoods toegerekend uit AH's eigen recepttotaal (zie "Alleen complete
+recepten"). Er was hier ooit een modus die het hele gerecht met één factor schaalde
+(×1,7 op alles) omdat alleen AH's portietotaal bekend was; die is eruit.
 
 Kruiden en zout worden bewust nauwelijks geschaald (de solver snapt niets van smaak),
 en ingrediënten kun je vastzetten met `locked`.
@@ -55,8 +56,9 @@ ingredienten alleen:
   Alleen als AH niets over de menugang zegt, valt de app terug op de titelheuristiek.
 * **`nutrition`** — de voedingswaarde per portie, door AH zelf berekend. Die wordt
   overgenomen zonder één productzoekopdracht, en een eigen berekening overschrijft hem
-  nooit (`recipe_nutrition.source`). Genoeg om te plannen is het niet: daarvoor moeten
-  de ingrediënten alsnog aan producten gekoppeld zijn.
+  nooit (`recipe_nutrition.source`). Hij vult ook de gaten die het matchen laat vallen —
+  zie "Alleen complete recepten" hieronder — en wordt daarom bij het recept bewaard
+  (`recipes.nutrition_per_serving`), zodat het plannen er ook bij kan.
 * **De paginastate zelf** — bij de huidige App Router staat die in de
   `self.__next_f`-chunks (zie `extractFlightJson`), en daar is het recept veel rijker
   dan in de `ld+json`: naam als `{singular, plural}`, `quantityUnit` naast de
@@ -77,13 +79,30 @@ plaats van stilletjes "geen product gevonden" te worden.
 ## Alleen complete recepten
 
 Een recept wordt in één keer helemaal afgemaakt of het wordt niet opgeslagen. Compleet
-betekent: elk ingrediënt heeft een AH-product met echte voedingswaarde per 100 g, óf
-het hoort nul te zijn (water, zout, peper — zie `isNutritionFree` in
-`src/nutrition/resolve.ts`).
+betekent: van elk ingrediënt is de voedingswaarde bekend. Dat kan op drie manieren, in
+deze volgorde:
 
-Lukt dat niet, dan komt het recept in `skipped_recipes` mét de reden ("geen product
-voor \"middelgroot scharrelei\""). Twee weken lang wordt het niet opnieuw opgehaald;
-daarna krijgt het één nieuwe kans, want de reden is vaak dat ónze matcher het product
+1. **Een AH-product** met een echte voedingswaardetabel per 100 g.
+2. **Nul**, omdat het ingrediënt niets bijdraagt (water, zout, peper — zie
+   `isNutritionFree` in `src/nutrition/resolve.ts`).
+3. **Het deel van AH's eigen recepttotaal** dat aan die regel toevalt
+   (`fillFromRecipeTotal`).
+
+Die derde stap is er niet voor de sier. De eis "een product bij elke regel" leek streng
+maar was vooral onhaalbaar: juist de gewoonste dingen — courgette, een scharrelei, een
+sjalot, verse kruiden — staan bij AH als versproduct zónder voedingswaardetabel, en één
+zo'n regel keurde een verder prima recept voorgoed af. In de praktijk sneuvelde daar
+bijna alles op. AH zet de voedingswaarde per portie wél op de receptpagina, en dat is
+hun eigen berekening over het hele gerecht: nauwkeuriger dan wat wij uit losse producten
+optellen. Het verschil tussen dat totaal en wat de gematchte producten al verklaren, is
+precies wat de ontbrekende regels samen bijdragen; dat verschil wordt naar gewicht over
+die regels verdeeld. Zo houdt de solver per ingrediënt cijfers om mee te rekenen en telt
+het geheel op tot wat AH zegt. Zulke regels heten `geschat` en zijn als zodanig
+zichtbaar in de UI en in `recipe_nutrition.source` (`ah` in plaats van `products`).
+
+Lukt geen van de drie, dan komt het recept in `skipped_recipes` mét de reden ("geen
+voedingswaarde voor \"middelgroot scharrelei\""). Twee weken lang wordt het niet
+opnieuw opgehaald; daarna krijgt het één nieuwe kans, want de reden is vaak dat ónze matcher het product
 niet vond en een verbetering daarin zou zulke recepten anders nooit meer bereiken.
 
 **Alleen een geslaagde zoekopdracht die niets oplevert is een oordeel.** Een blokkade,
@@ -133,15 +152,16 @@ npm run deploy
 ```
 
 Werk je op een database die er al stond, draai dan de migraties — dat is nodig na
-elke update die er een toevoegt (nu tot en met `0005_complete_only.sql`, voor de
-afgekeurde recepten):
+elke update die er een toevoegt (nu tot en met `0006_recipe_nutrition_from_ah.sql`, dat
+AH's eigen voedingswaarde bij het recept bewaart en de recepten vrijgeeft die onder de
+oude, strengere regel zijn afgekeurd):
 
 ```bash
 npm run db:migrate          # alle migraties op de remote database
 npm run db:migrate:local    # of lokaal
 ```
 
-De `ALTER TABLE`-regels in `0002` falen met "duplicate column name" als de kolommen er
+De `ALTER TABLE`-regels in `0002` en `0006` falen met "duplicate column name" als de kolommen er
 al zijn; dat is verwacht en betekent dat je klaar bent. Daarom staan de migraties met
 `;` achter elkaar en niet met `&&`: zo loopt de rest gewoon door.
 
@@ -205,12 +225,20 @@ Open de worker-URL op je telefoon. Vier tabbladen:
 - **Dag** — je ziet meteen alle eetmomenten met hun doel, nog leeg. Vul ze los in met
   "Genereer dit eetmoment", of laat de hele dag in één klik samenstellen. Per maaltijd
   kun je om een ander recept vragen (vergelijkbare macro's, ander gerecht), favoriet
-  maken of blokkeren. Onderaan het dagtotaal tegenover je doel, en "Dag opslaan".
+  maken of blokkeren. Onder elk ingrediënt staat het AH-product dat eraan gekoppeld is,
+  met een link naar de productpagina — dat is wat je in de winkel pakt. Onderaan het
+  dagtotaal tegenover je doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
   ingrediënten over alle dagen bij elkaar opgeteld, met links naar het AH-product.
 - **Database** — alles wat er in staat: recepten (met labels, voedingswaarde en welke
   nog niet doorgerekend zijn), producten, ingredient-naar-product-koppelingen en het
   scrape-archief. Doorzoekbaar, en de ruwe payload van elke scrape is op te vragen.
+
+Een tik op de naam van een recept — op een dagkaart, een keuzekaart of in de database —
+opent het receptvenster: alle ingrediënten met hun hoeveelheid, het gekoppelde
+AH-product en wat elke regel aan calorieën bijdraagt, plus de voedingswaarde per portie
+en voor het hele gerecht. Daar staat ook bij waar die cijfers vandaan komen: opgeteld
+uit de producten, of van AH zelf met de ontbrekende regels naar gewicht toegerekend.
 
 ### API
 

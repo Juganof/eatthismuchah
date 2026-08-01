@@ -88,6 +88,9 @@ export const styles = `
     border: 1px solid var(--line); border-radius: 12px; font-weight: 400; cursor: pointer;
   }
   .option:hover, .option:focus-visible { border-color: var(--accent); }
+  /* De knop om het recept eerst te bekijken hoort bij de kaart erboven, dus geen
+     extra ruimte ertussen. */
+  .option-wrap .actions { margin-top: 6px; }
   .option strong { display: block; }
   .option .macros { margin: 6px 0 4px; }
 
@@ -128,6 +131,32 @@ export const styles = `
 
   .meal-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .meal-head .slot { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+
+  /* Het product onder een ingredientregel: ondergeschikt aan de regel zelf,
+     maar wel aanklikbaar — dit is wat je in de winkel of in je mandje legt. */
+  .prod { font-size: .78rem; text-decoration: none; }
+  .prod-none { font-size: .78rem; color: var(--muted); }
+  .row .name { display: block; }
+
+  /* Een receptnaam die je kunt aantikken. Ziet eruit als tekst, gedraagt zich
+     als een knop, zodat toetsenbord en schermlezer het ook snappen. */
+  .linklike {
+    width: auto; margin: 0; padding: 0; background: none; border: 0;
+    color: inherit; font: inherit; font-weight: 700; text-align: left;
+    cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 3px;
+  }
+  .linklike:hover, .linklike:focus-visible { color: var(--accent); }
+
+  /* Het receptvenster. Op een telefoon vult het bijna het scherm; scrollen doet
+     de inhoud, niet de pagina eronder. */
+  dialog {
+    width: min(620px, 94vw); max-height: 88vh; overflow-y: auto;
+    background: var(--card); color: var(--text);
+    border: 1px solid var(--line); border-radius: 14px; padding: 16px;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .5); }
+  dialog h2 { margin-bottom: 4px; }
 
   /* Weekoverzicht: kolommen op een groot scherm, gestapeld op een telefoon. */
   .week { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }

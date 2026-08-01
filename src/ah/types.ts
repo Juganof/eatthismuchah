@@ -69,6 +69,13 @@ export interface ResolvedIngredient {
   gramsSource: "explicit" | "volume" | "piece" | "spoon" | "fallback";
   /** 0..1 confidence of the ingredient→product match. */
   matchScore: number;
+  /**
+   * Waar de cijfers van deze regel vandaan komen. "product" is een echte
+   * AH-productlabel, "nul" een ingredient dat niets bijdraagt (water, zout), en
+   * "geschat" het deel van AH's eigen recepttotaal dat aan deze regel is
+   * toegerekend omdat er geen product bij te vinden was. Zie `fillFromRecipeTotal`.
+   */
+  nutrientSource: "product" | "nul" | "geschat" | "onbekend";
 }
 
 export interface ResolvedRecipe {
@@ -76,4 +83,10 @@ export interface ResolvedRecipe {
   ingredients: ResolvedIngredient[];
   /** Sum over all ingredients, for the whole recipe. */
   total: Nutrients;
+  /**
+   * "products" = helemaal opgebouwd uit gematchte AH-producten. "ah" = het gat
+   * dat de producten lieten vallen is gevuld met AH's eigen voedingswaarde van
+   * de receptpagina.
+   */
+  source: "ah" | "products";
 }

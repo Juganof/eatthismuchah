@@ -86,6 +86,19 @@ describe("recipe storage", () => {
     expect(tags).not.toContain("vlees");
   });
 
+  it("bewaart AH's eigen voedingswaarde, want het plannen leest alleen uit de database", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ nutritionPerServing: { kcal: 520, protein: 41 } }));
+    expect((await store.getRecipe("R-R1"))?.nutritionPerServing).toEqual({ kcal: 520, protein: 41 });
+  });
+
+  it("laat een herscrape zonder voedingswaarde de eerder gevonden cijfers staan", async () => {
+    const store = freshStore();
+    await store.putRecipe(recipe({ nutritionPerServing: { kcal: 520 } }));
+    await store.putRecipe(recipe({ nutritionPerServing: null }));
+    expect((await store.getRecipe("R-R1"))?.nutritionPerServing).toEqual({ kcal: 520 });
+  });
+
   it("derives tags so the diet filter has something to work with", async () => {
     const store = freshStore();
     await store.putRecipe(recipe());

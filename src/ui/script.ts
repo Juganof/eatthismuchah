@@ -253,6 +253,44 @@ function mealHead(meal) {
     + g(meal.targets.protein) + 'g eiwit</span></div>';
 }
 
+/** De link naar de AH-productpagina van één webshop-id. */
+function productHref(webshopId) {
+  return "https://www.ah.nl/producten/product/wi" + encodeURIComponent(webshopId);
+}
+
+/**
+ * Het AH-product achter een ingredientregel. Dit is wat je in de winkel pakt,
+ * dus het staat onder elke regel en niet weggestopt achter een uitklapper.
+ */
+function productLine(i) {
+  if (!i.productTitle) {
+    return '<span class="prod-none">geen AH-product gekoppeld</span>';
+  }
+  const size = i.productSize ? ' &middot; ' + escapeHtml(i.productSize) : '';
+  const label = escapeHtml(i.productTitle) + size;
+  return i.productId
+    ? '<a class="prod" href="' + productHref(i.productId) + '" target="_blank" rel="noopener">' + label + '</a>'
+    : '<span class="prod-none">' + label + '</span>';
+}
+
+/** Eén ingredientregel: naam, het product eronder, en de hoeveelheid rechts. */
+function ingredientRow(i) {
+  // Drie verschillende dingen, en dat verschil is de moeite waard: geen cijfers,
+  // cijfers uit AH's eigen recepttotaal, of een echt productlabel.
+  const flag = i.unmatched
+    ? ' <span class="muted">(geen voedingswaarde)</span>'
+    : (i.nutrientSource === "geschat" ? ' <span class="muted">(schatting via AH)</span>' : '');
+  return '<div class="row"><span><span class="name">' + escapeHtml(i.name) + flag + '</span>'
+    + productLine(i) + '</span>'
+    + '<span class="amt">' + amountFor(i) + '</span></div>';
+}
+
+/** Een receptnaam waar je op kunt tikken voor het receptvenster. */
+function recipeLink(recipeId, title) {
+  return '<button class="linklike recipe-open" type="button" data-recipe="'
+    + escapeHtml(recipeId) + '">' + escapeHtml(title) + '</button>';
+}
+
 function planCard(meal) {
   // Er staan keuzekaarten klaar: die krijgen voorrang op de vaste kaart, zolang
   // er nog niet definitief gekozen is.
@@ -269,12 +307,7 @@ function planCard(meal) {
       + '</div>';
   }
 
-  const rows = p.ingredients.map((i) => {
-    const flag = i.unmatched
-      ? ' <span class="muted">(geen voedingswaarde)</span>'
-      : '';
-    return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span><span class="amt">' + amountFor(i) + '</span></div>';
-  }).join("");
+  const rows = p.ingredients.map(ingredientRow).join("");
 
   const scalingNote = p.coverage < 0.8
     ? '<p class="note">Let op: voor ' + Math.round((1 - p.coverage) * 100)
@@ -284,9 +317,10 @@ function planCard(meal) {
 
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
     + mealHead(meal)
-    + '<strong>' + escapeHtml(p.title) + '</strong>'
+    + recipeLink(p.recipeId, p.title)
     + macroChips(p.perPortion)
     + rows
+    + scalingNote
     + '<div class="actions">'
     + '<button class="secondary small reroll" type="button">&#128260; Ander recept</button>'
     + '<button class="secondary small fav" type="button">&#9829; Favoriet</button>'
@@ -303,16 +337,25 @@ function scaleSummary(plan) {
     : changed + " van " + plan.ingredients.length + " ingredi\\u00ebnten aangepast";
 }
 
-/** Eén keuzekaart: een tik erop kiest hem meteen, dus dit is een <button>. */
+/**
+ * Eén keuzekaart: een tik erop kiest hem meteen, dus dat is een <button>. De
+ * knop om het recept eerst te bekijken staat er bewust náást en niet in: een
+ * knop in een knop bestaat niet, en per ongeluk kiezen terwijl je alleen wilde
+ * kijken is precies wat je niet wilt.
+ */
 function optionCard(option, index) {
   const p = option.plan;
   const bucketLabel = option.bucket === "origineel" ? "zoals het recept" : "aangepast aan je doel";
-  return '<button class="option" type="button" data-index="' + index + '">'
+  return '<div class="option-wrap">'
+    + '<button class="option" type="button" data-index="' + index + '">'
     + '<strong>' + escapeHtml(p.title) + '</strong>'
     + '<div class="macros"><span class="macro">' + bucketLabel + '</span></div>'
     + macroChips(p.perPortion)
     + '<p class="muted" style="margin:4px 0 0">' + escapeHtml(scaleSummary(p)) + '</p>'
-    + '</button>';
+    + '</button>'
+    + '<div class="actions"><button class="secondary small recipe-open" type="button" data-recipe="'
+    + escapeHtml(p.recipeId) + '">Bekijk ingredi\\u00ebnten</button></div>'
+    + '</div>';
 }
 
 /** Kaart met een handvol opties in plaats van één vast plan. */
@@ -553,6 +596,80 @@ $("shoppingList").onclick = () => run($("shoppingList"), async () => {
   $("shoppingOut").innerHTML = '<div class="card"><h2>Boodschappen (' + data.days + ' dagen)</h2>' + rows + '</div>';
 });
 
+// ------------------------------------------------------- receptvenster
+
+/**
+ * Alles wat er over één recept te zeggen valt: de ingredienten met het
+ * AH-product dat eraan hangt, wat elke regel bijdraagt, en de voedingswaarde per
+ * portie én voor het hele gerecht.
+ *
+ * De knoppen die dit openen staan overal (dagkaart, keuzekaart, database), dus
+ * dit luistert op documentniveau in plaats van per kaart opnieuw gebonden te
+ * worden — dan blijft het ook werken na een hertekening.
+ */
+document.addEventListener("click", (event) => {
+  const button = event.target.closest ? event.target.closest("[data-recipe]") : null;
+  if (!button) return;
+  event.preventDefault();
+  openRecipe(button.dataset.recipe);
+});
+
+$("recipeClose").onclick = () => $("recipeDialog").close();
+
+async function openRecipe(id) {
+  const dialog = $("recipeDialog");
+  $("recipeBody").innerHTML = '<p class="muted">Bezig\\u2026</p>';
+  if (!dialog.open) dialog.showModal();
+  try {
+    $("recipeBody").innerHTML = recipeDetail(await api("/api/recipe/" + encodeURIComponent(id)));
+  } catch (err) {
+    $("recipeBody").innerHTML = '<p class="note">' + escapeHtml(err.message) + '</p>';
+  }
+}
+
+/** De hoeveelheid zoals het recept hem opschreef, plus de grammen erachter. */
+function detailAmount(i) {
+  const suffix = unitSuffix(i.gramsSource, i.unit);
+  const own = i.quantity !== null && suffix ? formatQty(i.quantity) + " " + suffix : null;
+  // Stond het recept al in grammen, dan is het herhalen ervan alleen ruis.
+  if (!own || i.gramsSource === "explicit") return g(i.grams) + " g";
+  return own + ' <span class="muted">(' + g(i.grams) + ' g)</span>';
+}
+
+function recipeDetail(data) {
+  const r = data.recipe;
+  const rows = data.ingredients.map((i) => {
+    const kcal = i.nutrients && i.nutrients.kcal !== undefined
+      ? g(i.nutrients.kcal) + " kcal"
+      : '<span class="warnish">geen voedingswaarde</span>';
+    return '<div class="row"><span><span class="name">' + escapeHtml(i.name) + '</span>'
+      + productLine({ productTitle: i.product, productId: i.productId, productSize: i.productSize })
+      + '</span><span class="amt">' + detailAmount(i) + '<br>' + kcal + '</span></div>';
+  }).join("");
+
+  // Waar de cijfers vandaan komen hoort erbij: AH's eigen opgave klopt als
+  // totaal, maar de verdeling over de regels is dan door ons toegerekend.
+  const geschat = data.ingredients.filter((i) => i.nutrientSource === "geschat").length;
+  const bron = data.nutritionSource === "ah"
+    ? '<p class="muted">Voedingswaarde van AH zelf; voor ' + plural(geschat, "ingredient", "ingredienten")
+      + ' zonder gekoppeld product is het aandeel naar gewicht toegerekend.</p>'
+    : '<p class="muted">Voedingswaarde opgeteld uit de gekoppelde AH-producten.</p>';
+
+  return '<h2>' + escapeHtml(r.title) + '</h2>'
+    + '<p class="muted">' + plural(r.servings || data.servings, "portie", "porties") + ' &middot; '
+    + plural(data.ingredients.length, "ingredient", "ingredienten") + '</p>'
+    + '<p class="muted" style="margin-top:10px">Per portie:</p>'
+    + macroChips(data.perPortion)
+    + '<p class="muted">Hele recept:</p>'
+    + macroChips(data.total)
+    + rows
+    + bron
+    + (data.ontbreekt
+      ? '<p class="note">Voor "' + escapeHtml(data.ontbreekt) + '" is geen voedingswaarde bekend.</p>'
+      : "")
+    + '<div class="actions"><a href="' + r.url + '" target="_blank" rel="noopener">Bereiding op ah.nl</a></div>';
+}
+
 // ---------------------------------------------------------- database
 
 const browse = { kind: "recipes", offset: 0, limit: 50, total: 0 };
@@ -570,8 +687,9 @@ function browseRecipe(r) {
   const flag = r.prefStatus === "fav" ? ' &#9829;' : (r.prefStatus === "blocked" ? ' &#9940;' : '');
   const tags = r.tags.length ? r.tags.map((t) => '<span class="macro">' + escapeHtml(t) + '</span>').join("") : '<span class="macro">geen labels</span>';
   return '<div class="card">'
-    + '<strong><a href="' + r.url + '" target="_blank" rel="noopener">' + escapeHtml(r.title) + '</a></strong>' + flag
-    + '<p class="muted" style="margin:4px 0">' + macros + '</p>'
+    + recipeLink(r.id, r.title) + flag
+    + '<p class="muted" style="margin:4px 0">' + macros
+    + ' &middot; <a href="' + r.url + '" target="_blank" rel="noopener">op ah.nl</a></p>'
     + '<div class="macros">' + tags + '</div>'
     + '<p class="muted" style="margin:4px 0">' + plural(r.ingredientCount, "ingredient", "ingredienten")
     + ' &middot; ' + plural(r.servings, "portie", "porties")

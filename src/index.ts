@@ -3,7 +3,7 @@ import { AhClient, collectRecipes, type RawScrape } from "./ah/client";
 import { extractEmbeddedJson } from "./ah/scrape";
 
 import { Store, type SavedDayMeal } from "./db/queries";
-import { firstIncomplete, resolveRecipe } from "./nutrition/resolve";
+import { coverageOf, firstIncomplete, resolveRecipe } from "./nutrition/resolve";
 import { autoStatus, configFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
@@ -260,7 +260,16 @@ app.post("/api/auto/run", async (c) => {
   return c.json(await runAutoIngest(c.env, configFrom(c.env), { force: body.force === true }));
 });
 
-/** Nutrition and ingredient breakdown for one recipe, without any rescaling. */
+/**
+ * Alles wat over één recept te weten valt: de ingredienten, welk AH-product er
+ * bij elke regel hoort en wat die regel aan voedingswaarde bijdraagt. Hier hangt
+ * het receptvenster in de UI aan — een tik op een recept laat precies dit zien.
+ *
+ * Een recept dat we al kennen wordt zuiver uit de database beantwoord. Anders
+ * zou het openen van een venster tientallen zoekopdrachten aan ah.nl kosten, met
+ * de verplichte pauze ertussen, en duurt het minuten voordat er iets op het
+ * scherm staat.
+ */
 app.get("/api/recipe/:id", async (c) => {
   const store = storeFor(c.env);
   const client = clientFor(c.env, c.executionCtx);
@@ -268,16 +277,27 @@ app.get("/api/recipe/:id", async (c) => {
 
   const known = await store.getRecipe(id);
   const recipe = known ?? (await client.getRecipe(id));
-  if (!recipe) return c.json({ error: "recipe not found" }, 404);
+  if (!recipe) return c.json({ error: "recept niet gevonden" }, 404);
 
-  const resolved = await resolveRecipe(recipe, client, store);
+  const resolved = await resolveRecipe(recipe, client, store, { cacheOnly: known !== null });
   // Opslaan gaat via dezelfde regel als het scrapen: compleet of niet. Zo kan het
   // openen van een recept nooit een half recept in de database achterlaten.
   const outcome = known ? "opgeslagen" : await completeRecipe(store, client, recipe);
 
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const perPortion: Record<string, number> = {};
+  for (const [key, value] of Object.entries(resolved.total)) perPortion[key] = value / servings;
+
   return c.json({
     recipe: resolved.recipe,
+    servings,
     total: resolved.total,
+    perPortion,
+    // "ah" betekent: de gaten zijn gevuld met AH's eigen cijfers van de
+    // receptpagina. Dat mag de gebruiker weten, want het is een schatting per
+    // regel — het totaal klopt, de verdeling erover is toegerekend.
+    nutritionSource: resolved.source,
+    coverage: Math.round(coverageOf(resolved) * 100) / 100,
     opgeslagen: outcome === "opgeslagen",
     ontbreekt: firstIncomplete(resolved),
     ingredients: resolved.ingredients.map((i) => ({
@@ -287,7 +307,11 @@ app.get("/api/recipe/:id", async (c) => {
       grams: Math.round(i.grams * 10) / 10,
       gramsSource: i.gramsSource,
       product: i.product?.title ?? null,
+      productId: i.product?.webshopId ?? null,
+      productSize: i.product?.salesUnitSize ?? null,
+      productUrl: i.product ? `https://www.ah.nl/producten/product/wi${i.product.webshopId}` : null,
       matchScore: Math.round(i.matchScore * 100) / 100,
+      nutrientSource: i.nutrientSource,
       nutrients: i.nutrients,
     })),
   });

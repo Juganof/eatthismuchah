@@ -202,36 +202,104 @@ export async function resolveRecipe(
   for (const raw of recipe.ingredients) {
     const { grams, source } = toGrams(raw);
     const { product, score } = await resolveProduct(raw, client, store, options.cacheOnly);
+    const hasNutrition = product !== null && product.per100g.kcal !== undefined;
     ingredients.push({
       raw,
       grams,
       product,
       gramsSource: source,
       matchScore: score,
-      nutrients: product ? scaleNutrients(product.per100g, grams) : {},
+      nutrients: hasNutrition ? scaleNutrients(product.per100g, grams) : {},
+      nutrientSource: hasNutrition ? "product" : isNutritionFree(raw.name) ? "nul" : "onbekend",
     });
   }
+
+  const source = fillFromRecipeTotal(recipe, ingredients) ? "ah" : "products";
 
   return {
     recipe,
     ingredients,
     total: sumNutrients(ingredients.map((i) => i.nutrients)),
+    source,
   };
+}
+
+/**
+ * Vult de gaten met AH's eigen voedingswaarde van de receptpagina.
+ *
+ * Waarom dit er is: de eis "elk ingredient een AH-product met een voedingswaarde­-
+ * tabel" leek streng maar was vooral onhaalbaar. Juist de gewoonste dingen —
+ * courgette, een scharrelei, een sjalot, verse kruiden — staan bij AH als
+ * versproduct zonder tabel, en één zo'n regel keurde een verder prima recept
+ * voorgoed af. In de praktijk sneuvelde daar bijna alles op.
+ *
+ * AH zet op de receptpagina zelf de voedingswaarde per portie, en die is
+ * nauwkeuriger dan wat wij uit losse producten optellen: het is hun eigen
+ * berekening over het hele gerecht. Het verschil tussen dat totaal en wat de
+ * gematchte producten al verklaren, is precies wat de ontbrekende regels samen
+ * bijdragen. Dat verschil wordt naar gewicht over die regels verdeeld.
+ *
+ * Zo blijft de rekenmodel-kant intact — de solver heeft per ingredient cijfers
+ * nodig, niet alleen een recepttotaal — en telt het geheel op tot wat AH zegt.
+ * Geeft AH geen voedingswaarde, dan verandert er niets en blijft het oude,
+ * strenge oordeel staan.
+ *
+ * Geeft `true` terug als er daadwerkelijk iets is bijgevuld.
+ */
+export function fillFromRecipeTotal(
+  recipe: Recipe,
+  ingredients: ResolvedIngredient[],
+): boolean {
+  const perServing = recipe.nutritionPerServing;
+  if (!perServing || perServing.kcal === undefined) return false;
+
+  const gaps = ingredients.filter((i) => i.nutrientSource === "onbekend");
+  if (gaps.length === 0) return false;
+
+  // AH schrijft per portie; alles hier rekent op het hele recept.
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const matched = sumNutrients(ingredients.map((i) => i.nutrients));
+
+  // Naar gewicht verdelen, want een handvol peterselie hoort niet evenveel te
+  // krijgen als 400 g kip. Zonder bruikbare grammen is gelijk verdelen het enige
+  // eerlijke alternatief.
+  const totalGrams = gaps.reduce((sum, i) => sum + i.grams, 0);
+  const shareOf = (ingredient: ResolvedIngredient) =>
+    totalGrams > 0 ? ingredient.grams / totalGrams : 1 / gaps.length;
+
+  for (const key of NUTRIENT_KEYS) {
+    const whole = perServing[key];
+    if (whole === undefined) continue;
+    // Verklaren de producten al meer dan AH's totaal, dan valt er niets te
+    // verdelen: negatieve calorieen bestaan niet en aftrekken zou de gematchte
+    // regels ongeloofwaardig maken.
+    const rest = whole * servings - (matched[key] ?? 0);
+    if (rest <= 0) continue;
+    for (const ingredient of gaps) ingredient.nutrients[key] = rest * shareOf(ingredient);
+  }
+
+  for (const ingredient of gaps) ingredient.nutrientSource = "geschat";
+  return true;
 }
 
 /**
  * Share of the recipe's weight that we found nutrition for. This is the honest
  * confidence signal: 12 matched herbs and one unmatched 400 g chicken is bad
  * coverage even though 12 of 13 lines matched.
+ *
+ * Een regel die uit AH's eigen recepttotaal is bijgevuld telt hier mee: die
+ * cijfers komen van AH zelf en zijn daarmee niet minder waard dan een
+ * productlabel. Of er ook een product bij hoort is een andere vraag — die stelt
+ * de boodschappenlijst, niet de voedingswaarde.
  */
 export function coverageOf(resolved: ResolvedRecipe): number {
   let total = 0;
-  let matched = 0;
+  let known = 0;
   for (const ing of resolved.ingredients) {
     total += ing.grams;
-    if (ing.product && Object.keys(ing.product.per100g).length > 0) matched += ing.grams;
+    if (isComplete(ing)) known += ing.grams;
   }
-  return total > 0 ? matched / total : 0;
+  return total > 0 ? known / total : 0;
 }
 
 /**
@@ -272,8 +340,13 @@ export function isNutritionFree(name: string): boolean {
   return words.every((word) => NUTRITION_FREE.has(word));
 }
 
-/** Een ingredient telt als opgelost als het echte cijfers heeft, of nul hoort te zijn. */
+/**
+ * Een ingredient telt als opgelost als het cijfers heeft, of nul hoort te zijn.
+ * Een regel die uit AH's recepttotaal is bijgevuld ("geschat") telt mee: die
+ * heeft echte cijfers, alleen niet uit een productlabel.
+ */
 export function isComplete(ingredient: ResolvedIngredient): boolean {
+  if (ingredient.nutrientSource === "nul" || ingredient.nutrientSource === "geschat") return true;
   if (isNutritionFree(ingredient.raw.name)) return true;
   return ingredient.product !== null && ingredient.product.per100g.kcal !== undefined;
 }

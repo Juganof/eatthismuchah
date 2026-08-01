@@ -186,6 +186,21 @@ export function browseTab(): string {
 </section>`;
 }
 
+/**
+ * Het receptvenster: één tik op een recept, waar dan ook in de app, laat hier
+ * alle ingredienten zien met het AH-product dat eraan hangt en wat elke regel
+ * aan voedingswaarde bijdraagt. Leeg tot `openRecipe` het vult.
+ */
+export function recipeDialog(): string {
+  return `
+<dialog id="recipeDialog" aria-label="Recept">
+  <div id="recipeBody"><p class="muted">Bezig&hellip;</p></div>
+  <div class="actions">
+    <button class="secondary small" id="recipeClose" type="button">Sluiten</button>
+  </div>
+</dialog>`;
+}
+
 /** Beheer: scrapen, archief en diagnose. */
 export function adminCard(): string {
   return `

@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS recipes (
   tags         TEXT,
   -- AH's eigen labels uit het keywords-veld van de receptpagina, JSON. Dit is
   -- hun indeling ("ontbijt", "tussendoortje") en gaat voor op onze heuristiek.
-  keywords     TEXT
+  keywords     TEXT,
+  -- De voedingswaarde per portie zoals AH die zelf op de receptpagina zet, JSON.
+  -- Hiermee worden de ingredienten gevuld waar geen product bij te vinden was;
+  -- zie fillFromRecipeTotal in src/nutrition/resolve.ts.
+  nutrition_per_serving TEXT
 );
 
 CREATE TABLE IF NOT EXISTS products (

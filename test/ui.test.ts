@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { script } from "../src/ui/script";
-import { adminCard, browseTab } from "../src/ui/markup";
+import { adminCard, browseTab, recipeDialog } from "../src/ui/markup";
 
 /**
  * De clientcode is één grote template-string, dus de compiler kijkt er niet in:
@@ -20,8 +20,16 @@ describe("gegenereerde clientcode", () => {
     expect(script).not.toContain("${");
   });
 
+  it("heeft een receptvenster met de elementen die de code aanspreekt", () => {
+    const markup = recipeDialog();
+    for (const id of ["recipeDialog", "recipeBody", "recipeClose"]) {
+      expect(script, `${id} wordt aangesproken`).toContain(`$("${id}")`);
+      expect(markup, `${id} staat in de markup`).toContain(`id="${id}"`);
+    }
+  });
+
   it("spreekt alleen elementen aan die in de markup staan", () => {
-    const markup = adminCard() + browseTab();
+    const markup = adminCard() + browseTab() + recipeDialog();
     const ids = [...script.matchAll(/\$\("([a-zA-Z0-9_-]+)"\)/g)].map((m) => m[1]!);
     // Alleen de nieuwe log- en wisknoppen; de rest van de UI zit in andere
     // tabbladen die deze test niet inleest.

@@ -20,6 +20,7 @@ const recipe: ResolvedRecipe = {
       nutrients: { kcal: 825, protein: 155, carbs: 0, fat: 18 },
       gramsSource: "explicit",
       matchScore: 0.9,
+      nutrientSource: "product",
     },
     {
       raw: { name: "rijst", quantity: 300, unit: "g" },
@@ -28,6 +29,7 @@ const recipe: ResolvedRecipe = {
       nutrients: { kcal: 1050, protein: 21, carbs: 234, fat: 1.8 },
       gramsSource: "explicit",
       matchScore: 0.9,
+      nutrientSource: "product",
     },
     {
       raw: { name: "olijfolie", quantity: 20, unit: "g" },
@@ -36,6 +38,7 @@ const recipe: ResolvedRecipe = {
       nutrients: { kcal: 177, protein: 0, carbs: 0, fat: 20 },
       gramsSource: "explicit",
       matchScore: 0.9,
+      nutrientSource: "product",
     },
     {
       raw: { name: "peper en zout", quantity: null, unit: null },
@@ -44,9 +47,13 @@ const recipe: ResolvedRecipe = {
       nutrients: {},
       gramsSource: "fallback",
       matchScore: 0,
+      // Geen product en geen cijfers: dit is de regel waarop "unmatched" en de
+      // dekkingsgraad slaan.
+      nutrientSource: "onbekend",
     },
   ],
   total: { kcal: 2052, protein: 176, carbs: 234, fat: 39.8 },
+  source: "products",
 };
 
 // `per100g` is empty above because planRecipe reads the pre-scaled `nutrients`;
@@ -147,6 +154,7 @@ describe("planRecipe", () => {
           nutrients: { kcal: 320, protein: 4, carbs: 80, fat: 0.4 },
           gramsSource: "piece",
           matchScore: 0.9,
+          nutrientSource: "product",
         },
       ],
     };

@@ -26,9 +26,15 @@ export interface PlannedIngredient {
   scale: number;
   nutrients: Nutrients;
   productTitle: string | null;
+  /** Webshop-id van het gekoppelde product, zodat de UI ernaartoe kan linken. */
+  productId: string | null;
+  /** Verpakking zoals AH die noemt, bv. "500 g" — dat is wat je in de winkel pakt. */
+  productSize: string | null;
   matchScore: number;
   /** True when nutrition is unknown, so the solver had nothing to go on. */
   unmatched: boolean;
+  /** Waar de cijfers van deze regel vandaan komen; zie ResolvedIngredient. */
+  nutrientSource: "product" | "nul" | "geschat" | "onbekend";
   /**
    * Quantity in the recipe's own unit (e.g. "3" bananen, "1.5" el), for the whole
    * plan. Null when AH gave no quantity. This is what should be shown to a cook —
@@ -113,8 +119,13 @@ export function planRecipe(
       scale: Math.round(scale * 100) / 100,
       nutrients,
       productTitle: ing.product?.title ?? null,
+      productId: ing.product?.webshopId ?? null,
+      productSize: ing.product?.salesUnitSize ?? null,
       matchScore: ing.matchScore,
-      unmatched: !ing.product || Object.keys(ing.product.per100g).length === 0,
+      nutrientSource: ing.nutrientSource,
+      // "Geen voedingswaarde", niet "geen product": een regel die uit AH's eigen
+      // recepttotaal is bijgevuld heeft cijfers, alleen geen productlabel.
+      unmatched: ing.nutrientSource === "onbekend",
       originalQuantity: ing.raw.quantity !== null ? round((ing.raw.quantity / servings) * portions) : null,
       unit: ing.raw.unit,
       gramsSource: ing.gramsSource,
@@ -162,12 +173,23 @@ export function targetCost(perPortion: Nutrients, targets: MacroTarget[]): numbe
 
 function coverageOfPlan(ingredients: PlannedIngredient[]): number {
   let total = 0;
-  let matched = 0;
+  let known = 0;
   for (const ing of ingredients) {
     total += ing.originalGrams;
-    if (!ing.unmatched) matched += ing.originalGrams;
+    if (!ing.unmatched) known += ing.originalGrams;
   }
-  return total > 0 ? matched / total : 0;
+  return total > 0 ? known / total : 0;
+}
+
+/** Het aandeel van het gewicht waar een écht AH-product achter zit. */
+export function productCoverageOf(plan: Plan): number {
+  let total = 0;
+  let backed = 0;
+  for (const ing of plan.ingredients) {
+    total += ing.originalGrams;
+    if (ing.nutrientSource === "product") backed += ing.originalGrams;
+  }
+  return total > 0 ? backed / total : 0;
 }
 
 function round(n: number): number {
