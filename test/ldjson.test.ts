@@ -89,6 +89,66 @@ describe("parsing a real Allerhande recipe page", () => {
   });
 });
 
+/**
+ * Een echte receptpagina bevat het recept twee keer: de paginastate met de rijke
+ * ingredienten, en de ld+json met AH's eigen voedingswaarde. Ze dragen niet
+ * hetzelfde id — `1202636` tegenover `R-R1202636` — en de een weet wat de ander
+ * mist. Gaat dat mis, dan houdt het recept geen voedingswaarde over en sneuvelt
+ * het op het eerste ingredient zonder productlabel (courgette, limoen).
+ */
+describe("de paginastate en de ld+json van dezelfde pagina", () => {
+  const FLIGHT_RECIPE = {
+    id: 1202636,
+    title: "Courgette-frittata met roomkaas en citroen",
+    href: "https://www.ah.nl/allerhande/recept/R-R1202636/courgette-frittata",
+    serving: { number: 4 },
+    ingredients: [
+      { name: { singular: "courgette", plural: "courgettes" }, quantity: 2, quantityUnit: { singular: "stuk" } },
+      { name: { singular: "milde olijfolie" }, quantity: 4, quantityUnit: { singular: "el" } },
+    ],
+  };
+
+  const LD_JSON = {
+    "@context": "https://schema.org",
+    "@type": "Recipe",
+    name: "Courgette-frittata met roomkaas en citroen",
+    url: "https://www.ah.nl/allerhande/recept/R-R1202636/courgette-frittata",
+    recipeYield: "4",
+    keywords: "vegetarisch, lunch",
+    nutrition: {
+      "@type": "NutritionInformation",
+      calories: "320 kcal energie",
+      fatContent: "27 g vet",
+      carbohydrateContent: "5 g koolhydraten",
+      proteinContent: "14 g eiwit",
+    },
+    recipeIngredient: ["2 courgettes", "4 el milde olijfolie"],
+  };
+
+  // De App Router levert de state als flight-stream; de chunk is een
+  // JSON-string met daarin een regel "<id>:<payload>".
+  const flightChunk = JSON.stringify("\n3:" + JSON.stringify(FLIGHT_RECIPE) + "\n");
+  const page =
+    `<!DOCTYPE html><html><head><script type="application/ld+json">${JSON.stringify(LD_JSON)}</script>` +
+    `</head><body><script>self.__next_f.push([1,${flightChunk}])</script></body></html>`;
+
+  const parsed = collectRecipes(extractEmbeddedJson(page));
+
+  it("houdt er één recept aan over, niet twee", () => {
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.id).toBe("R-R1202636");
+  });
+
+  it("neemt de rijke ingredienten van de paginastate", () => {
+    // Met de eenheid apart; de ld+json heeft alleen "4 el milde olijfolie".
+    expect(parsed[0]!.ingredients[1]).toMatchObject({ name: "milde olijfolie", quantity: 4, unit: "el" });
+  });
+
+  it("neemt de voedingswaarde uit de ld+json, die de paginastate niet heeft", () => {
+    expect(parsed[0]!.nutritionPerServing).toEqual({ kcal: 320, fat: 27, carbs: 5, protein: 14 });
+  });
+});
+
 describe("parseKeywords", () => {
   it("splits on commas and slashes and lowercases", () => {
     expect(parseKeywords("Gezond, brood/sandwiches, Ontbijt")).toEqual([

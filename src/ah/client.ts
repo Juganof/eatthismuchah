@@ -542,10 +542,24 @@ export function parseProductLinks(html: string): Product[] {
   return out;
 }
 
-/** Recognises anything in a payload that looks like a recipe and normalises it. */
+/**
+ * Recognises anything in a payload that looks like a recipe and normalises it.
+ *
+ * Eén receptpagina bevat hetzelfde recept twee keer, en elk van beide weet iets
+ * dat de ander niet weet. De paginastate (`self.__next_f`) heeft de rijke
+ * ingredienten: naam als {singular, plural}, de eenheid apart, de productlink.
+ * De `ld+json` daarentegen is de enige plek waar AH's eigen voedingswaarde per
+ * portie staat. Ze worden daarom samengevoegd in plaats van dat de tweede
+ * weggegooid wordt — dat laatste kostte precies die voedingswaarde, en daarmee
+ * de enige cijfers die een recept met courgette of limoen nog konden redden.
+ *
+ * Samenvoegen gaat op het genormaliseerde id: de paginastate schrijft `1202636`
+ * waar de ld+json `R-R1202636` schrijft, dus op de ruwe waarde zouden het twee
+ * verschillende recepten lijken.
+ */
 export function collectRecipes(root: unknown): Recipe[] {
   const out: Recipe[] = [];
-  const seenIds = new Set<string>();
+  const byId = new Map<string, Recipe>();
 
   const visit = (v: unknown): void => {
     if (Array.isArray(v)) {
@@ -567,10 +581,9 @@ export function collectRecipes(root: unknown): Recipe[] {
       title !== null &&
       (isSchemaRecipe || "ingredients" in v || "servings" in v || "href" in v);
 
-    if (looksLikeRecipe && !seenIds.has(id)) {
+    if (looksLikeRecipe) {
       const recipeId = id.startsWith("R-R") ? id : `R-R${id}`;
-      seenIds.add(id);
-      out.push({
+      const found: Recipe = {
         id: recipeId,
         title,
         url: url ?? `${RECIPE_BASE}/recept/${recipeId}`,
@@ -579,13 +592,37 @@ export function collectRecipes(root: unknown): Recipe[] {
         ingredients: parseIngredients(v["ingredients"] ?? v["recipeIngredient"]),
         keywords: parseKeywords(v["keywords"] ?? v["tags"] ?? v["recipeCategory"], v["classifications"]),
         nutritionPerServing: parseNutritionLd(v["nutrition"]),
-      });
+      };
+      const existing = byId.get(recipeId);
+      if (existing) mergeRecipe(existing, found);
+      else {
+        byId.set(recipeId, found);
+        out.push(found);
+      }
     }
     Object.values(v).forEach(visit);
   };
 
   visit(root);
   return out;
+}
+
+/**
+ * Vult in `into` aan wat er nog niet stond. Wie het eerst kwam houdt gelijk: die
+ * komt uit de paginastate en is rijker. Alleen een leeg veld wordt overgenomen,
+ * zodat een schrale kaart nooit een volledig recept kan uitkleden.
+ */
+function mergeRecipe(into: Recipe, from: Recipe): void {
+  if (into.ingredients.length === 0 && from.ingredients.length > 0) {
+    into.ingredients = from.ingredients;
+  }
+  if (!into.nutritionPerServing && from.nutritionPerServing) {
+    into.nutritionPerServing = from.nutritionPerServing;
+  }
+  if ((into.keywords?.length ?? 0) === 0 && (from.keywords?.length ?? 0) > 0) {
+    into.keywords = from.keywords;
+  }
+  if (!into.imageUrl && from.imageUrl) into.imageUrl = from.imageUrl;
 }
 
 /**
