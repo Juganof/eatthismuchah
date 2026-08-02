@@ -28,6 +28,12 @@ export interface DayMeal {
   /** De zoekhints van dit moment, zodat herrollen ze mee kan sturen. */
   slotTags: string[];
   plan: Plan | null;
+  /**
+   * De keuzekaarten voor dit moment: maximaal zes opties, gesorteerd met de
+   * beste eerst (kleinste afstand tot het momentdoel). De eerste optie is
+   * hetzelfde als `plan`, zodat de UI met één tik het getoonde gerecht kiest.
+   */
+  options?: PlanOption[];
   /** Ingevuld wanneer er geen recept gevonden werd. */
   note?: string;
 }
@@ -51,6 +57,8 @@ export interface DayOptions {
   excludeRecipeIds?: string[];
   kcalMode?: "target" | "max";
   candidatesPerSlot?: number;
+  /** Hoeveel keuzekaarten elk moment meekrijgt; 1..6, standaard 4. */
+  optionsPerMeal?: number;
 }
 
 const MACRO_KEYS = ["kcal", "protein", "carbs", "fat", "fiber"] as const;
@@ -236,6 +244,15 @@ async function planSlot(
  * tot 2 die al dicht bij het doel zitten, de rest bijgesteld — en is een van
  * beide emmers te klein, dan vult de andere aan in plaats van minder kaarten
  * te tonen dan gevraagd.
+ *
+ * De smaakscore (favoriet, recent, zoekhints) beslist wélke opties de selectie
+ * halen. De volgorde die de gebruiker te zien krijgt is daar los van: die is
+ * altijd op afstand tot het momentdoel, de beste eerst. Die afstand is
+ * `plan.cost` — de maat die de solver zelf minimaliseert, mét de weging die
+ * `buildTargets` aan de macro's geeft en mét het kcalMode-gedrag. `targetCost`
+ * meet het recept zoals het geschreven staat (vóór herschalen) en
+ * `macroDistance` negeert die weging; `plan.cost` zegt dus het beste wat de
+ * gebruiker daadwerkelijk eet.
  */
 function pickOptions(all: PlanOption[], count: number): PlanOption[] {
   const seen = new Set<string>();
@@ -254,7 +271,11 @@ function pickOptions(all: PlanOption[], count: number): PlanOption[] {
     if (picked.length >= count) break;
     picked.push(option);
   }
-  return picked;
+  // Bij gelijke kosten beslist de recipeId, zodat de volgorde deterministisch
+  // blijft, los van de volgorde waarin de database de kandidaten teruggeeft.
+  return picked.sort(
+    (a, b) => a.plan.cost - b.plan.cost || a.plan.recipeId.localeCompare(b.plan.recipeId),
+  );
 }
 
 /** Doel min behaald, per macro. */
@@ -324,14 +345,25 @@ export async function generateDay(
       fiber: Math.max(0, Math.round(entry.targets.fiber + carry.fiber / slotsLeft)),
     };
 
-    const plan = await planSlot(store, client, targets, {
+    // Eén candidate-ronde levert én het gekozen plan én de keuzekaarten: de
+    // beste optie op afstand tot het momentdoel is wat de dag krijgt, de rest
+    // blijft liggen om op te tikken. Zo toont "Genereer hele dag" hetzelfde
+    // soort keuze als "Genereer dit eetmoment", zonder het moment dubbel te
+    // berekenen. De pincode (0.9-1.1) blijft een herrollen-ding; net als bij
+    // planSlot mogen hier recepten vrij geschaald worden.
+    const candidates = await planCandidates(store, client, targets, {
       diet: options.diet,
       excludedTerms: options.excludedTerms,
       excludeRecipeIds: chosen,
       kcalMode: options.kcalMode,
       limit: options.candidatesPerSlot ?? 25,
       slotTags: entry.slot.tags,
+      pinNearFit: false,
     });
+
+    const count = Math.min(Math.max(options.optionsPerMeal ?? 4, 1), 6);
+    const choices = pickOptions(candidates, count);
+    const plan = choices[0]?.plan ?? null;
 
     if (plan) {
       chosen.push(plan.recipeId);
@@ -347,7 +379,9 @@ export async function generateDay(
       targets,
       slotTags: entry.slot.tags,
       plan,
-      ...(plan ? {} : { note: "geen passend recept in de database — scrape er meer met /api/ingest" }),
+      ...(plan
+        ? { options: choices }
+        : { note: "geen passend recept in de database — scrape er meer met /api/ingest" }),
     });
   }
 
