@@ -122,6 +122,7 @@ export class GqlClient {
     const res = await fetch(HOME_URL, {
       headers: {
         "User-Agent": this.userAgent,
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "nl-NL,nl;q=0.9",
       },
     });
@@ -149,11 +150,14 @@ export class GqlClient {
         headers: {
           "Content-Type": "application/json;charset=UTF-8",
           Accept: "application/json",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
           "Accept-Language": "nl-NL,nl;q=0.9",
           "User-Agent": this.userAgent,
           Origin: "https://www.ah.nl/",
           Referer: referer,
           "x-client-platform-type": "Web",
+          "x-client-name": "ah-allerhande",
+          "x-client-version": "3.23.124",
           "x-correlation-id": `ssr-gql-${Math.random().toString(36).slice(2, 18)}`,
           ...(this.cookie ? { Cookie: this.cookie } : {}),
         },

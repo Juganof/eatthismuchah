@@ -249,6 +249,15 @@ geheel". Zonder verrijking werkt alles precies als voorheen: de app valt terug o
 receptvoeding en de gewichtsverdeling erover. Er is dus geen harde afhankelijkheid van
 het endpoint — noodzakelijk, want onofficieel kan morgen veranderen.
 
+**Bekende beperking (geverifieerd op 2026-08-02):** het endpoint werkt vanuit de
+Cloudflare Worker-runtime niet. Akamai's botbescherming blokkeert de TLS-vingerafdruk
+van `workerd` op `POST /gql` (403), ook met de headers die vanaf een gewone machine
+wél werken; vanaf die machine werkt het (curl), maar Node's eigen HTTP-stack krijgt
+al 403. De verrijking staat daarom standaard uit (`ENRICH_ENABLED = "0"`) en levert
+vanuit de worker op dit moment niets op — de rest van de app draait er onveranderd
+door. Staat AH zijn blokkade-gedrag bij, dan is de feature zonder code-wijziging aan
+te zetten.
+
 ## Gebruik
 
 Open de worker-URL op je telefoon. Vier tabbladen:
