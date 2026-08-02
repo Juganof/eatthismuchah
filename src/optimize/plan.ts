@@ -1,4 +1,4 @@
-import type { Nutrients, ResolvedRecipe } from "../ah/types";
+import { NUTRIENT_KEYS, type Nutrients, type ResolvedIngredient, type ResolvedRecipe } from "../ah/types";
 import { sumNutrients } from "../nutrition/resolve";
 import { solve, type MacroTarget, type SolverIngredient } from "./solver";
 
@@ -70,26 +70,67 @@ export interface Plan {
  */
 const SEASONING = /peper|zout|kruid|specerij|kaneel|nootmuskaat|paprikapoeder|komijn|kerrie|bouillon|gist|bakpoeder|vanille/i;
 
-function boundsFor(name: string, opts: PlanOptions): { min: number; max: number } {
-  if (opts.locked?.some((l) => name.includes(l.toLowerCase()))) return { min: 1, max: 1 };
-  if (SEASONING.test(name)) {
-    // Intersect rather than override: a caller pinning everything close to 1 (an
-    // "as written" option) must still pin the seasoning, not fall back to its own
-    // wider default range.
-    const min = Math.max(0.75, opts.minScale ?? 0.25);
-    const max = Math.min(1.5, opts.maxScale ?? 3);
-    return { min: Math.min(min, max), max };
-  }
-  return { min: opts.minScale ?? 0.25, max: opts.maxScale ?? 3 };
+function isLocked(name: string, opts: PlanOptions): boolean {
+  return opts.locked?.some((l) => name.includes(l.toLowerCase())) ?? false;
 }
 
 /**
- * Of dit recept alleen als geheel geschaald mag worden. Dat is zo zodra geen
- * enkele regel een echt productlabel achter zich heeft — en dat is sinds het
- * loslaten van de productkoppeling het normale geval.
+ * Of deze regel mee mag schalen. Alleen regels met echte cijfers achter zich —
+ * een AH-productlabel ("product") of een aandeel van AH's recepttotaal
+ * ("geschat") — mogen per regel worden bijgesteld. "nul" draagt niets bij,
+ * "onbekend" heeft geen cijfers. Een locked regel is een eigenschap van de
+ * planner-aanroep, geen van de regel: die wordt in `boundsForLine` op 1 gezet.
  */
-function uniformScaleOf(resolved: ResolvedRecipe): boolean {
-  return resolved.ingredients.every((ing) => ing.nutrientSource !== "product");
+export function isScalable(line: ResolvedIngredient): boolean {
+  return line.nutrientSource === "product" || line.nutrientSource === "geschat";
+}
+
+/** Voedingswaarde per gram, als vector over de macro's. */
+function densityOf(line: ResolvedIngredient): number[] {
+  return NUTRIENT_KEYS.map((key) => (line.nutrients[key] ?? 0) / Math.max(1e-9, line.grams));
+}
+
+/**
+ * Data-poort voor de takkeuze: hebben alle schaalbare regels dezelfde
+ * dichtheidsvector (binnen epsilon, genormaliseerd per macro), dan is per-regel
+ * schalen zinloos — elke regel is in verhouding identiek aan de andere, dus de
+ * solver zou ze allemaal op dezelfde factor zetten. Zo'n recept (het normale
+ * geval: alles "geschat" uit AH's recepttotaal) schaalt als één geheel, exact
+ * zoals voorheen. Echte productlabels hebben vrijwel altijd verschillende
+ * dichtheden en krijgen wél per-regel grenzen.
+ */
+export function sameDensity(lines: ResolvedIngredient[]): boolean {
+  let reference: number[] | null = null;
+  for (const line of lines) {
+    if (!isScalable(line)) continue;
+    const density = densityOf(line);
+    if (reference === null) {
+      reference = density;
+      continue;
+    }
+    for (let k = 0; k < density.length; k++) {
+      const a = density[k]!;
+      const b = reference[k]!;
+      if (Math.abs(a - b) > 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Per-regel grenzen voor de per-ingrediënt-tak. Locked en niet-schaalbare
+ * regels blijven op 1; kruiden mogen een klein beetje mee (ze verpesten het
+ * gerecht snel), "naar smaak"-regels iets meer, en de rest krijgt de vaste
+ * default [0.5, 2.0]. De oude ruime [0.25, 3.0] bestaat alleen nog in de
+ * uniforme tak, waar één factor het hele gerecht is.
+ */
+function boundsForLine(line: ResolvedIngredient, opts: PlanOptions): { min: number; max: number } {
+  if (isLocked(line.raw.name, opts) || !isScalable(line)) return { min: 1, max: 1 };
+  if (SEASONING.test(line.raw.name)) return { min: 0.75, max: 1.5 };
+  // "naar smaak": AH gaf geen hoeveelheid, dus elke gram is een schatting —
+  // daar mag ruim geschaald worden, maar niet met de default mee.
+  if (line.raw.quantity === null || line.gramsSource === "fallback") return { min: 0.5, max: 1.5 };
+  return { min: 0.5, max: 2.0 };
 }
 
 /**
@@ -128,7 +169,7 @@ export function planRecipe(
     for (const [k, v] of Object.entries(ing.nutrients)) {
       perPortionNutrients[k as keyof Nutrients] = v / servings;
     }
-    return { nutrients: perPortionNutrients, ...boundsFor(ing.raw.name, opts) };
+    return { nutrients: perPortionNutrients, ...boundsForLine(ing, opts) };
   });
 
   // Zonder productgegevens per ingredient is de voedingswaarde per regel een
@@ -136,8 +177,14 @@ export function planRecipe(
   // elkaar schalen zou verzonnen precisie zijn: "minder olie" scheelt in die
   // rekensom evenveel als "minder courgette", en dat is niet zo. Het hele
   // gerecht schaalt daarom als één geheel — dat is precies wél waar AH's cijfer
-  // over gaat, want een halve portie is de helft van alles.
-  const result = uniformScaleOf(resolved)
+  // over gaat, want een halve portie is de helft van alles. Echte productlabels
+  // ("product") hebben vrijwel altijd verschillende dichtheden; die mogen per
+  // regel geschaald worden. Eén locked regel dwingt ook de per-ingrediënt-tak
+  // af: de uniforme tak schaalt alles met één factor en zou de gelockte regel
+  // daarin mee laten schalen.
+  const hasLocked = resolved.ingredients.some((ing) => isLocked(ing.raw.name, opts));
+  const uniform = !hasLocked && sameDensity(resolved.ingredients);
+  const result = uniform
     ? solveUniform(solverIngredients, targets, opts)
     : solve(solverIngredients, targets, { shapePenalty: opts.shapePenalty });
 
