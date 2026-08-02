@@ -295,24 +295,29 @@ describe("zich inhouden", () => {
     const env = envFor();
     // cooldownAfterBlocks 1: deze test gaat over hoe lang er afgekoeld wordt,
     // niet over vanaf hoeveel rondes dat begint.
+    // Vaste klok: de afkoelperiode is een tijdstip, en met een echte Date.now()
+    // hangt de meting af van hoe lang de ronde zelf duurde. Dat viel op sommige
+    // machines buiten de tolerantie (64 ms vertraging tegen een marge van 50).
+    const clock = 1_000_000;
     const config = {
       ...fastConfig,
       cooldownMs: 1000,
       maxCooldownMs: 3000,
       cooldownAfterBlocks: 1,
+      now: () => clock,
     };
 
     stubAh({ blockDetails: true });
     const first = await runAutoIngest(env, config, { force: true });
-    expect(first.cooldownUntil! - Date.now()).toBeCloseTo(1000, -2);
+    expect(first.cooldownUntil).toBe(clock + 1000);
 
     stubAh({ blockDetails: true });
     const second = await runAutoIngest(env, config, { force: true });
-    expect(second.cooldownUntil! - Date.now()).toBeCloseTo(2000, -2);
+    expect(second.cooldownUntil).toBe(clock + 2000);
 
     stubAh({ blockDetails: true });
     const third = await runAutoIngest(env, config, { force: true });
-    expect(third.cooldownUntil! - Date.now()).toBeCloseTo(3000, -2);
+    expect(third.cooldownUntil).toBe(clock + 3000);
 
     // Een schone ronde zet de teller terug op nul.
     stubAh();
@@ -322,7 +327,7 @@ describe("zich inhouden", () => {
     // blokkeren: de vorige ronde heeft R-R101 en R-R102 al compleet opgeslagen.
     stubAh({ blockDetails: true, ids: ["R-R201", "R-R202"] });
     const afterReset = await runAutoIngest(env, config, { force: true });
-    expect(afterReset.cooldownUntil! - Date.now()).toBeCloseTo(1000, -2);
+    expect(afterReset.cooldownUntil).toBe(clock + 1000);
   });
 
   it("draait wel als je hem forceert, zonder de afkoelperiode uit te zitten", async () => {

@@ -59,6 +59,12 @@ export interface AutoConfig {
    * veel meer dan het oplevert. Twee rondes op rij is een ander verhaal.
    */
   cooldownAfterBlocks: number;
+  /**
+   * Klok voor het tijdstip van deze ronde. Alleen tests sturen hem: met een
+   * vaste klok is "afkoelen tot nu + cooldownMs" exact te controleren, zonder
+   * dat de duur van de ronde zelf de meting vertekent.
+   */
+  now?: () => number;
 }
 
 export const DEFAULT_AUTO_CONFIG: AutoConfig = {
@@ -126,7 +132,7 @@ export async function runAutoIngest(
   options: { force?: boolean } = {},
 ): Promise<AutoResult> {
   const store = new Store(env.DB);
-  const now = Date.now();
+  const now = config.now?.() ?? Date.now();
 
   if (!options.force) {
     // Uitgezet betekent uit. Zonder deze schakelaar is de database niet leeg te
