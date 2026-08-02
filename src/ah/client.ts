@@ -1,6 +1,9 @@
 import type { Nutrients, Product, RawIngredient, Recipe } from "./types";
 import { isKnownUnit } from "../nutrition/units";
+import { resetPace, sharedPace } from "./pace";
 import { deepFind, extractEmbeddedJson } from "./scrape";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const AUTH_URL = "https://api.ah.nl/mobile-auth/v1/auth/token/anonymous";
 const PRODUCT_SEARCH_URL = "https://api.ah.nl/mobile-services/product/search/v2";
@@ -9,18 +12,6 @@ const PRODUCT_PAGE_URL = "https://www.ah.nl/producten/product/wi";
 const PRODUCT_SEARCH_PAGE = "https://www.ah.nl/producten/zoeken";
 const SITE_BASE = "https://www.ah.nl";
 const RECIPE_BASE = `${SITE_BASE}/allerhande`;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Module-scope, not per-client: elke aanroep (een knop in de UI, de cron, een
- * andere API-route) bouwt zijn eigen `AhClient`, en die kunnen ook nog eens
- * gelijktijdig lopen. Pacing per instance zou dan niets voorstellen — twee
- * knoppen kort na elkaar ingedrukt spreken elk hun eigen klok, die allebei op
- * nul begint, en samen alsnog een tempo-blokkade veroorzaken. Deze klok wordt
- * gedeeld door elke `AhClient` die in hetzelfde worker-isolate leeft.
- */
-let lastRequestAt = 0;
 
 /**
  * De JSON-zoekdienst van Allerhande gaf in de praktijk 404 op élke aanroep, en
@@ -63,7 +54,7 @@ export const isBudgetError = (err: unknown): err is SubrequestBudgetError =>
 export function resetEndpointState(): void {
   recipeSearchJsonDead = false;
   productApiDead = false;
-  lastRequestAt = 0;
+  resetPace();
 }
 
 /** Wat er gescraped werd, zodat het archief doorzoekbaar blijft per soort. */
@@ -192,9 +183,7 @@ export class AhClient {
   private async pace(): Promise<void> {
     if (this.requests >= this.maxRequests) throw new SubrequestBudgetError(this.requests);
     this.requests++;
-    const wait = this.minIntervalMs - (Date.now() - lastRequestAt);
-    if (wait > 0) await sleep(wait);
-    lastRequestAt = Date.now();
+    await sharedPace(this.minIntervalMs);
   }
 
   private async htmlGet(url: string, archive?: { kind: ScrapeKind; ref: string }): Promise<string> {
