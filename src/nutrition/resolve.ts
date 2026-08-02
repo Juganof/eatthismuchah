@@ -1,6 +1,8 @@
 import {
   NUTRIENT_KEYS,
+  type NutrientKey,
   type Nutrients,
+  type Product,
   type Recipe,
   type ResolvedIngredient,
   type ResolvedRecipe,
@@ -14,16 +16,15 @@ import { toGrams } from "./units";
  * staat. Dat is hun berekening over het hele gerecht en dus het meest
  * betrouwbare wat er te krijgen is.
  *
- * Er wordt niet meer per ingredient een AH-product bij gezocht. Dat is er
- * bewust uit: het matchen op naam raadde te vaak mis ("middelgroot scharrelei"
- * tegen "AH Scharreleieren", "snoepkomkommer" tegen niets), veel verse producten
- * hebben bij AH helemaal geen voedingswaardetabel, en één misser keurde een
- * verder prima recept voorgoed af. Bovendien kostte het per recept vijftien tot
- * dertig verzoeken aan ah.nl, terwijl de receptpagina zelf er maar één kost — en
- * met dat verschil passen er per ronde tientallen recepten in plaats van een
- * handjevol.
+ * De productkoppeling is ooit bewust verwijderd: het matchen op naam raadde te
+ * vaak mis, veel verse producten hebben geen voedingswaardetabel en het kostte
+ * per recept tientallen verzoeken aan ah.nl. De koppeling die overblijft is
+ * daarom niet een zoekactie hier, maar eerder gevonden matches die van buiten
+ * worden meegegeven: `resolveRecipe` accepteert een map van genormaliseerde
+ * ingredientnamen naar producten en gebruikt die gemeten per-100g-waarden als
+ * verdeelsleutel per regel. AH's recepttotaal blijft daarbij het anker.
  *
- * Deze module doet daarom geen enkele aanroep meer: hij is een pure berekening.
+ * Deze module doet zelf geen enkele aanroep: hij is een pure berekening.
  */
 
 export function scaleNutrients(per100g: Nutrients, grams: number): Nutrients {
@@ -67,6 +68,17 @@ export function recipeTotal(recipe: Recipe): Nutrients | null {
 }
 
 /**
+ * Een eerder gevonden koppeling tussen een ingredientnaam en een AH-product.
+ * De map die `resolveRecipe` meekrijgt, is gesleuteld op de genormaliseerde
+ * ingredientnaam (lowercase) — zo slaat `putMatch` hem in de database op.
+ */
+export interface ProductMatch {
+  product: Product;
+  /** 0..1 confidence van de oorspronkelijke ingredient→product-match. */
+  score: number;
+}
+
+/**
  * Rekent het recepttotaal naar gewicht toe aan de losse ingredienten.
  *
  * De solver werkt per ingredient, dus die heeft per regel een getal nodig — het
@@ -80,12 +92,50 @@ export function recipeTotal(recipe: Recipe): Nutrients | null {
  *
  * Water, zout en peper krijgen niets: die dragen echt nul bij, en meetellen zou
  * hun aandeel van de rest afsnoepen.
+ *
+ * Sinds de producten terug zijn, gaat de verdeling per macro-key anders te werk
+ * wanneer een regel een gematcht product met voedingswaarden heeft: die regel
+ * telt zijn gemeten waarden (`scaleNutrients`) in plaats van een aandeel. Het
+ * recepttotaal blijft het anker — een key zonder totaal houdt alleen de
+ * gemeten waarden, en als de producten samen hoger schatten dan AH, wordt hun
+ * bijdrage voor die key teruggeschaald.
  */
-export function resolveRecipe(recipe: Recipe): ResolvedRecipe {
+export function resolveRecipe(recipe: Recipe, products?: Map<string, ProductMatch>): ResolvedRecipe {
   const total = recipeTotal(recipe);
 
   const ingredients: ResolvedIngredient[] = recipe.ingredients.map((raw) => {
     const { grams, source } = toGrams(raw);
+    const match = products?.get(raw.name.toLowerCase());
+
+    if (isNutritionFree(raw.name)) {
+      return {
+        raw,
+        grams,
+        product: null,
+        gramsSource: source,
+        matchScore: 0,
+        nutrients: {},
+        nutrientSource: "nul",
+      };
+    }
+
+    // Een product zonder per-100g-waarden telt niet mee als bron; zo'n regel
+    // valt dan gewoon terug op de schatting uit het recepttotaal.
+    if (
+      match !== undefined &&
+      NUTRIENT_KEYS.some((key) => (match.product.per100g[key] ?? 0) > 0)
+    ) {
+      return {
+        raw,
+        grams,
+        product: match.product,
+        gramsSource: source,
+        matchScore: match.score,
+        nutrients: scaleNutrients(match.product.per100g, grams),
+        nutrientSource: "product",
+      };
+    }
+
     return {
       raw,
       grams,
@@ -93,18 +143,42 @@ export function resolveRecipe(recipe: Recipe): ResolvedRecipe {
       gramsSource: source,
       matchScore: 0,
       nutrients: {},
-      nutrientSource: isNutritionFree(raw.name) ? "nul" : total ? "geschat" : "onbekend",
+      nutrientSource: total ? "geschat" : "onbekend",
     };
   });
 
   if (total) {
-    const shares = ingredients.filter((i) => i.nutrientSource === "geschat");
-    const totalGrams = shares.reduce((sum, i) => sum + i.grams, 0);
-    for (const ingredient of shares) {
-      const share = totalGrams > 0 ? ingredient.grams / totalGrams : 1 / shares.length;
-      for (const key of NUTRIENT_KEYS) {
-        const value = total[key];
-        if (value !== undefined) ingredient.nutrients[key] = value * share;
+    const measured = ingredients.filter((i) => i.nutrientSource === "product");
+    const estimated = ingredients.filter((i) => i.nutrientSource === "geschat");
+
+    for (const key of NUTRIENT_KEYS) {
+      const target = total[key];
+      if (target === undefined) continue;
+
+      // Wat de producten voor deze key samen zeggen; regels zonder waarde
+      // dragen nul bij.
+      let measuredSum = 0;
+      for (const ingredient of measured) {
+        const value = ingredient.nutrients[key];
+        if (value !== undefined) measuredSum += value;
+      }
+
+      if (measuredSum === 0) {
+        // Niets gemeten: de vertrouwde gewichtsverdeling over de geschatte regels.
+        distributeByWeight(estimated, key, target);
+      } else if (target < measuredSum) {
+        // De producten schatten hoger dan AH; schaal ze allemaal terug en geef
+        // de geschatte regels niets, zodat het totaal blijft kloppen.
+        const factor = target / measuredSum;
+        for (const ingredient of measured) {
+          const value = ingredient.nutrients[key];
+          if (value !== undefined) ingredient.nutrients[key] = value * factor;
+        }
+        for (const ingredient of estimated) ingredient.nutrients[key] = 0;
+      } else {
+        // Gemeten waarden blijven staan; het gat eronder gaat naar gewicht
+        // naar de geschatte regels.
+        distributeByWeight(estimated, key, target - measuredSum);
       }
     }
   }
@@ -118,6 +192,19 @@ export function resolveRecipe(recipe: Recipe): ResolvedRecipe {
     total: total ?? {},
     source: total ? "ah" : "products",
   };
+}
+
+/**
+ * Verdeelt `amount` van één macro-key naar gewicht over de geschatte regels.
+ * Regels zonder gewicht krijgen gelijke delen, zodat delen door nul er nooit
+ * uit kan komen.
+ */
+function distributeByWeight(estimated: ResolvedIngredient[], key: NutrientKey, amount: number): void {
+  const totalGrams = estimated.reduce((sum, i) => sum + i.grams, 0);
+  for (const ingredient of estimated) {
+    const share = totalGrams > 0 ? ingredient.grams / totalGrams : 1 / estimated.length;
+    ingredient.nutrients[key] = amount * share;
+  }
 }
 
 /**
