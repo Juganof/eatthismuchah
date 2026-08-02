@@ -359,6 +359,20 @@ describe("matchMap", () => {
   });
 });
 
+describe("productMap", () => {
+  it("haalt titel en verpakking van meerdere producten in één query op", async () => {
+    const store = freshStore();
+    await store.putProduct({ webshopId: "wi-1", title: "Kikkererwten", salesUnitSize: "330 g", per100g: {} });
+    await store.putProduct({ webshopId: "wi-2", title: "Melk", salesUnitSize: "1 l", per100g: {} });
+
+    expect(await store.productMap(["wi-1", "wi-2"])).toEqual({
+      "wi-1": { title: "Kikkererwten", salesUnitSize: "330 g" },
+      "wi-2": { title: "Melk", salesUnitSize: "1 l" },
+    });
+    expect(await store.productMap([])).toEqual({});
+  });
+});
+
 describe("applicatielog", () => {
   it("bewaart regels met niveau, herkomst en details, nieuwste eerst", async () => {
     const store = freshStore();

@@ -266,6 +266,31 @@ export class Store {
       .run();
   }
 
+  /**
+   * Titel en verpakking voor een reeks webshop-ids in één query, net als
+   * `matchMap` voor de ingredientnamen. De boodschappenlijst heeft dit nodig om
+   * "2 × 330 g" te kunnen tonen; per id apart opvragen zou tientallen ronden
+   * naar D1 kosten.
+   */
+  async productMap(
+    ids: string[],
+  ): Promise<Record<string, { title: string; salesUnitSize: string | null }>> {
+    if (ids.length === 0) return {};
+    const { results } = await this.db
+      .prepare(
+        `SELECT webshop_id, title, sales_unit_size FROM products
+         WHERE webshop_id IN (${ids.map(() => "?").join(", ")})`,
+      )
+      .bind(...ids)
+      .all<{ webshop_id: string; title: string; sales_unit_size: string | null }>();
+
+    const out: Record<string, { title: string; salesUnitSize: string | null }> = {};
+    for (const row of results ?? []) {
+      out[row.webshop_id] = { title: row.title, salesUnitSize: row.sales_unit_size ?? null };
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- matches
 
   /**

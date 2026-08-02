@@ -663,9 +663,11 @@ app.get("/api/shopping", async (c) => {
     }
   }
 
-  // De productlinks komen uit de onthouden matches, in één query.
+  // De productlinks komen uit de onthouden matches, in één query; de
+  // verpakkingen ("2 × 330 g") uit de producten daarachter, ook in één query.
   const webshopIds = await store.matchMap([...names]);
-  const lines = buildShoppingList(inputs.map((input) => ({ ...input, webshopIds })));
+  const products = await store.productMap(Object.values(webshopIds));
+  const lines = buildShoppingList(inputs.map((input) => ({ ...input, webshopIds, products })));
   return c.json({ days: days.length, lines });
 });
 

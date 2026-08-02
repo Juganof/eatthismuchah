@@ -566,7 +566,13 @@ $("shoppingList").onclick = () => run($("shoppingList"), async () => {
       ? '<a href="' + line.productUrl + '" target="_blank" rel="noopener">' + escapeHtml(line.name) + '</a>'
       : escapeHtml(line.name);
     const flag = line.unmatched ? ' <span class="muted">(controleer zelf)</span>' : '';
-    return '<div class="row"><span>' + name + flag + '</span><span class="amt">' + line.grams + ' g</span></div>';
+    // Wat je pakt: verpakkingen als die bekend zijn, anders stuks, anders gram.
+    const amt = line.packagesLabel
+      ? line.packagesLabel
+      : line.pieces != null
+        ? g(line.pieces) + " stuks"
+        : g(line.grams) + " g";
+    return '<div class="row"><span>' + name + flag + '</span><span class="amt">' + escapeHtml(amt) + '</span></div>';
   }).join("");
   $("shoppingOut").innerHTML = '<div class="card"><h2>Boodschappen (' + data.days + ' dagen)</h2>' + rows + '</div>';
 });
