@@ -40,10 +40,12 @@ AUTO_COOLDOWN_MS = "1800000"
 # Bovengrens voor de afkoelperiode: blokkeert AH ons meteen weer zodra we het
 # opnieuw proberen, dan verdubbelt AUTO_COOLDOWN_MS elke keer tot hier aan toe.
 AUTO_MAX_COOLDOWN_MS = "14400000"
-# Ingredientnamen per enrichment-ronde (koppelt ingredienten aan AH-producten
-# voor recepten die AH's eigen voedingswaarde gebruikten en dus geen
-# productzoekopdracht deden — zie enrichIngredientMatches in src/ingest/pipeline.ts).
-AUTO_ENRICH_BATCH = "6"
-# Eén op de zoveel niet-repareer-rondes gaat naar koppelingen in plaats van
-# nieuwe recepten.
-AUTO_ENRICH_EVERY = "3"
+
+# --- productverrijking -----------------------------------------------------
+# Haalt na het opslaan van een recept de echte AH-producten per ingrediënt op
+# (via /gql): voedingswaarde per 100 g voor de planner en productlinks voor de
+# boodschappenlijst. Kost één verzoek voor de suggesties plus één per uniek
+# product, dus begrensd per ronde — zie src/ingest/enrich.ts.
+ENRICH_ENABLED = "0"
+# Maximaal aantal recepten dat één ronde verrijkt.
+ENRICH_RECIPES_PER_RUN = "3"

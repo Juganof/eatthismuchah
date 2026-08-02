@@ -1,5 +1,11 @@
 import { Store } from "../db/queries";
-import { MOMENTS, MOMENT_QUERIES, ingestComplete, type ScrapeEnv } from "./pipeline";
+import {
+  MOMENTS,
+  MOMENT_QUERIES,
+  ingestComplete,
+  type EnrichConfig,
+  type ScrapeEnv,
+} from "./pipeline";
 
 /**
  * Vult de database de hele dag door zichzelf aan, in kleine porties.
@@ -103,6 +109,16 @@ export interface AutoResult {
 
 const startOfToday = () => new Date().setUTCHours(0, 0, 0, 0);
 
+/**
+ * Verrijken aan of uit, en hoe veel recepten per ronde. Verrijken kost een
+ * handvol verzoeken per recept, dus standaard uit en per ronde begrensd.
+ */
+export function enrichConfigFrom(env: Record<string, unknown>): EnrichConfig | undefined {
+  if (env["ENRICH_ENABLED"] !== "1" && env["ENRICH_ENABLED"] !== "true") return undefined;
+  const perRun = Number(env["ENRICH_RECIPES_PER_RUN"]);
+  return { perRun: Number.isFinite(perRun) && perRun > 0 ? perRun : 3 };
+}
+
 export function configFrom(env: Record<string, unknown>): AutoConfig {
   const read = (key: string, fallback: number) => {
     const value = Number(env[key]);
@@ -179,7 +195,7 @@ export async function runAutoIngest(
     minIntervalMs: config.minIntervalMs,
     backoffMs: config.backoffMs,
     maxRequests: config.maxRequests,
-  });
+  }, enrichConfigFrom(env));
   await store.finishRun(runId, {
     added: result.added,
     repaired: result.rejected,

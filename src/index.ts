@@ -4,7 +4,7 @@ import { extractEmbeddedJson } from "./ah/scrape";
 
 import { Store, type SavedDayMeal } from "./db/queries";
 import { resolveRecipe } from "./nutrition/resolve";
-import { autoStatus, configFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
+import { autoStatus, configFrom, enrichConfigFrom, runAutoIngest, setAutoPaused } from "./ingest/auto";
 import {
   MOMENT_QUERIES,
   completeRecipe,
@@ -30,8 +30,6 @@ export interface Env {
   AUTO_MIN_INTERVAL_MS?: string;
   AUTO_COOLDOWN_MS?: string;
   AUTO_MAX_COOLDOWN_MS?: string;
-  AUTO_ENRICH_BATCH?: string;
-  AUTO_ENRICH_EVERY?: string;
   /** Index signature zodat configFrom de bovenstaande vars kan uitlezen. */
   [key: string]: unknown;
 }
@@ -164,7 +162,7 @@ app.get("/api/search", async (c) => {
 
   // Afmaken kost een productzoekopdracht per nieuw ingredient, dus dat mag de
   // zoekopdracht niet ophouden.
-  c.executionCtx?.waitUntil(completeRecipeIds(c.env, recipes.map((r) => r.id)));
+  c.executionCtx?.waitUntil(completeRecipeIds(c.env, recipes.map((r) => r.id), undefined, enrichConfigFrom(c.env)));
 
   return c.json({
     recipes: recipes.map(({ id, title, url, imageUrl }) => ({ id, title, url, imageUrl })),
@@ -190,11 +188,14 @@ app.post("/api/ingest", async (c) => {
         400,
       );
     }
-    return c.json({ moment: body.moment, ...(await ingestComplete(c.env, queries, limit)) });
+    return c.json({
+      moment: body.moment,
+      ...(await ingestComplete(c.env, queries, limit, undefined, enrichConfigFrom(c.env))),
+    });
   }
 
   const queries = body.queries ?? c.env.INGEST_QUERIES.split(",").map((s) => s.trim());
-  return c.json(await ingestComplete(c.env, queries, limit));
+  return c.json(await ingestComplete(c.env, queries, limit, undefined, enrichConfigFrom(c.env)));
 });
 
 /**

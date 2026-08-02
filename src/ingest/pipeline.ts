@@ -3,6 +3,7 @@ import type { Recipe } from "../ah/types";
 import { Store } from "../db/queries";
 import { deriveTags } from "../nutrition/diet";
 import { recipeTotal } from "../nutrition/resolve";
+import { enrichRecipeWithProducts } from "./enrich";
 
 /**
  * Het scrapen zelf, los van de routes. Zowel de knoppen in de UI als de
@@ -56,6 +57,16 @@ export interface ClientOptions {
   maxRequests?: number;
   /** Sla de JSON-zoekdienst over; zie RECIPE_JSON_DEAD hieronder. */
   skipRecipeJsonSearch?: boolean;
+}
+
+/**
+ * Verrijken met echte producten na het opslaan van een recept; zie
+ * `enrichRecipeWithProducts`. `perRun` is het aantal recepten per ronde dat
+ * verrijkt wordt — 0 betekent uit. Verrijken kost een handvol verzoeken per
+ * recept, dus het moet bewust aangezet worden en begrensd.
+ */
+export interface EnrichConfig {
+  perRun: number;
 }
 
 /** app_state-sleutel: de JSON-zoekdienst van Allerhande geeft alleen nog 404. */
@@ -170,16 +181,28 @@ export async function completeRecipeIds(
   env: ScrapeEnv,
   ids: string[],
   clientOptions?: ClientOptions,
+  enrich?: EnrichConfig,
 ): Promise<void> {
   const store = new Store(env.DB);
   const client = scrapeClient(env, store, clientOptions);
 
+  let enriched = 0;
   for (const id of ids) {
     if (client.budget.max - client.budget.used < 1) break;
     try {
       if (await store.isKnownRecipe(id)) continue;
       const recipe = await client.getRecipe(id);
-      if (recipe) await completeRecipe(store, recipe);
+      if (recipe) {
+        const outcome = await completeRecipe(store, recipe);
+        if (outcome === "opgeslagen" && enrich && enriched < enrich.perRun) {
+          enriched++;
+          await enrichRecipeWithProducts(env, store, recipe, {
+            minIntervalMs: clientOptions?.minIntervalMs,
+            backoffMs: clientOptions?.backoffMs,
+            maxRequests: client.budget.max - client.budget.used,
+          });
+        }
+      }
     } catch {
       // volgende recept; dit draait buiten het antwoord om
     }
@@ -203,6 +226,7 @@ export async function ingestComplete(
   queries: string[],
   limit: number,
   clientOptions?: ClientOptions,
+  enrich?: EnrichConfig,
 ): Promise<IngestResult> {
   const store = new Store(env.DB);
   const client = scrapeClient(env, store, {
@@ -213,6 +237,7 @@ export async function ingestComplete(
   let added = 0;
   let rejected = 0;
   let blocked = 0;
+  let enriched = 0;
   const errors: string[] = [];
 
   // Eén verzoek over is genoeg voor nog een recept: de pagina zelf.
@@ -247,8 +272,18 @@ export async function ingestComplete(
         }
 
         const outcome = await completeRecipe(store, recipe);
-        if (outcome === "opgeslagen") added++;
-        else if (outcome === "afgekeurd") rejected++;
+        if (outcome === "opgeslagen") {
+          added++;
+          if (enrich && enriched < enrich.perRun && budgetLeft() > 2) {
+            enriched++;
+            const enrichedResult = await enrichRecipeWithProducts(env, store, recipe, {
+              minIntervalMs: clientOptions?.minIntervalMs,
+              backoffMs: clientOptions?.backoffMs,
+              maxRequests: budgetLeft(),
+            });
+            for (const message of enrichedResult.errors.slice(0, 3)) errors.push(message);
+          }
+        } else if (outcome === "afgekeurd") rejected++;
       } catch (err) {
         // Budget op: niets vastleggen. Volgende ronde begint dit recept opnieuw.
         if (isBudgetError(err)) break;
