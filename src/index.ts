@@ -279,7 +279,10 @@ app.get("/api/recipe/:id", async (c) => {
   const recipe = known ?? (await client.getRecipe(id));
   if (!recipe) return c.json({ error: "recept niet gevonden" }, 404);
 
-  const resolved = resolveRecipe(recipe);
+  // De onthouden productkoppelingen meegeven, zodat elke regel met gemeten
+  // voedingswaarden telt in plaats van met een aandeel van het recepttotaal.
+  const matches = await store.productMatchesFor(recipe.ingredients.map((i) => i.name.toLowerCase()));
+  const resolved = resolveRecipe(recipe, matches);
   // Opslaan gaat via dezelfde regel als het scrapen: compleet of niet. Zo kan het
   // openen van een recept nooit een half recept in de database achterlaten.
   const outcome = known ? "opgeslagen" : await completeRecipe(store, recipe);
@@ -326,7 +329,8 @@ app.post("/api/plan", async (c) => {
   const recipe = known ?? (await client.getRecipe(body.recipeId));
   if (!recipe) return c.json({ error: "recipe not found" }, 404);
 
-  const resolved = resolveRecipe(recipe);
+  const matches = await store.productMatchesFor(recipe.ingredients.map((i) => i.name.toLowerCase()));
+  const resolved = resolveRecipe(recipe, matches);
   // Nieuw recept? Dan gaat het via dezelfde compleet-of-niet-regel de database in.
   if (!known) await completeRecipe(store, recipe);
 
@@ -361,7 +365,8 @@ app.post("/api/generate", async (c) => {
   for (const summary of shortlist) {
     const recipe = await store.getRecipe(summary.id);
     if (!recipe) continue;
-    const resolved = resolveRecipe(recipe);
+    const matches = await store.productMatchesFor(recipe.ingredients.map((i) => i.name.toLowerCase()));
+    const resolved = resolveRecipe(recipe, matches);
     plans.push(
       planRecipe(resolved, targets, {
         portions: body.portions ?? 1,

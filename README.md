@@ -258,6 +258,32 @@ vanuit de worker op dit moment niets op — de rest van de app draait er onveran
 door. Staat AH zijn blokkade-gedrag bij, dan is de feature zonder code-wijziging aan
 te zetten.
 
+### Lokaal verrijken
+
+Omdat het vanuit de worker niet kan, staat er een lokaal Node-script klaar dat
+dezelfde verrijking wél uitvoert: `scripts/enrich-local.mjs` haalt per recept via
+`curl.exe` de product-suggesties en voedingswaarden van `/gql` en schrijft die in de
+lokale D1-database (`.wrangler/state/`). De dev-server mag gewoon blijven draaien —
+het script opent de database ernaast (met een busy-timeout) en gebruikt dezelfde
+`Store`-klasse en parsers als de app.
+
+```bash
+node scripts/enrich-local.mjs
+```
+
+Eisen: `curl.exe` op de PATH, en de lokale database moet bestaan (start minstens één
+keer `wrangler dev` of draai `npm run db:init:local`). Het script houdt zelf ≥ 1 s
+rust tussen verzoeken aan ah.nl (Akamai reageert op tempo), herhaalt een 403/429 één
+keer na een wachttijd, en slaat een recept over waarvan alle ingrediënten al
+gekoppeld zijn. Producten die al in de database staan kosten niets meer.
+
+Zodra de database zo gevuld is, schaalt de app per ingrediënt met de gemeten
+voedingswaarden van het gekoppelde product en krijgt de boodschappenlijst de
+productlinks ("2 × 330 g") — precies wat de ingebouwde verrijking vanuit de worker
+zou doen (zie boven en "Het gerecht schaalt als geheel"). Koppelingen en producten
+zijn gewone database-data; de app leest ze gewoon, zonder dat er iets aangezet hoeft
+te worden.
+
 ## Gebruik
 
 Open de worker-URL op je telefoon. Vier tabbladen:

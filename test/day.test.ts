@@ -374,3 +374,91 @@ describe("macroDistance", () => {
     expect(macroDistance({ kcal: 100 }, {})).toBeGreaterThan(0);
   });
 });
+
+// --- per-ingrediënt schalen op basis van productmatches uit de database ---
+
+describe("per-ingrediënt schalen met DB-producten", () => {
+  /** Eén recept met producten en matches, precies zoals de enrich-pipeline ze achterlaat. */
+  async function storeWithProductMatches(): Promise<Store> {
+    db = createTestDb();
+    const store = new Store(db);
+    await seedRecipes(store, [
+      {
+        id: "R-R1",
+        title: "Kwark met banaan",
+        ingredients: [
+          { name: "kwark", grams: 250, per100g: FOODS.kwark! },
+          { name: "banaan", grams: 100, per100g: FOODS.banaan! },
+        ],
+      },
+    ]);
+    // Zelfde weg als de ingest: product eerst, dan de onthouden koppeling.
+    await store.putProduct({
+      webshopId: "wi-kwark",
+      title: "AH Magere kwark",
+      salesUnitSize: "500 g",
+      per100g: FOODS.kwark!,
+    });
+    await store.putProduct({
+      webshopId: "wi-banaan",
+      title: "AH Banaan",
+      salesUnitSize: null,
+      per100g: FOODS.banaan!,
+    });
+    await store.putMatch("kwark", "wi-kwark", 0.9);
+    await store.putMatch("banaan", "wi-banaan", 0.8);
+    return store;
+  }
+
+  // 0 betekent "niet meegeteld": buildTargets slaat nuldoelen over, dus dit is
+  // exact het eiwit+kcal-doel waarmee de C5-tests in plan.test.ts schalen.
+  const eiwitDoel: DailyTargets = { protein: 45, kcal: 230, carbs: 0, fat: 0, fiber: 0 };
+
+  it("schaalt kwark omhoog en banaan omlaag met gemeten waarden uit de database", async () => {
+    const store = await storeWithProductMatches();
+    const plan = await rerollSlot(store, client, {
+      targets: eiwitDoel,
+      kcalMode: "max",
+      excludeRecipeIds: [],
+    });
+
+    expect(plan).not.toBeNull();
+    const kwark = plan!.ingredients.find((i) => i.name === "kwark")!;
+    const banaan = plan!.ingredients.find((i) => i.name === "banaan")!;
+    // Zonder gelezen matches zou elke regel "geschat" zijn en het recept als één
+    // geheel schalen. Hier zijn de gezaaide producten (57 resp. 89 kcal/100 g)
+    // doorgedrongen tot de solver: eiwitrijke kwark omhoog, banaan omlaag.
+    expect(kwark.nutrientSource).toBe("product");
+    expect(banaan.nutrientSource).toBe("product");
+    expect(kwark.scale).toBeGreaterThan(1.05);
+    expect(banaan.scale).toBeLessThan(0.95);
+  });
+
+  it("zonder gezaaide matches schaalt hetzelfde recept uniform en blijft 'geschat'", async () => {
+    db = createTestDb();
+    const store = new Store(db);
+    await seedRecipes(store, [
+      {
+        id: "R-R1",
+        title: "Kwark met banaan",
+        ingredients: [
+          { name: "kwark", grams: 250, per100g: FOODS.kwark! },
+          { name: "banaan", grams: 100, per100g: FOODS.banaan! },
+        ],
+      },
+    ]);
+
+    const plan = await rerollSlot(store, client, {
+      targets: eiwitDoel,
+      kcalMode: "max",
+      excludeRecipeIds: [],
+    });
+
+    expect(plan).not.toBeNull();
+    const kwark = plan!.ingredients.find((i) => i.name === "kwark")!;
+    expect(kwark.nutrientSource).toBe("geschat");
+    // Alle regels zijn aandelen van AH's recepttotaal: één factor voor het geheel.
+    const scales = plan!.ingredients.map((i) => i.scale);
+    expect(new Set(scales).size).toBe(1);
+  });
+});

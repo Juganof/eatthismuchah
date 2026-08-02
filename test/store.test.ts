@@ -373,6 +373,49 @@ describe("productMap", () => {
   });
 });
 
+describe("productMatchesFor", () => {
+  it("haalt product en score per ingredientnaam in één query op", async () => {
+    const store = freshStore();
+    await store.putProduct({
+      webshopId: "wi-1",
+      title: "AH Magere kwark",
+      salesUnitSize: "500 g",
+      per100g: { kcal: 57, protein: 10 },
+    });
+    await store.putMatch("kwark", "wi-1", 0.9);
+    // Een onthouden misser zonder product hoort niet in de map terecht te komen.
+    await store.putMatch("water", null, 0);
+
+    const matches = await store.productMatchesFor(["kwark", "water", "onbekend"]);
+    expect(matches.get("kwark")).toEqual({
+      product: {
+        webshopId: "wi-1",
+        title: "AH Magere kwark",
+        salesUnitSize: "500 g",
+        per100g: { kcal: 57, protein: 10 },
+      },
+      score: 0.9,
+    });
+    expect(matches.has("water")).toBe(false);
+    expect(matches.has("onbekend")).toBe(false);
+    expect(await store.productMatchesFor([])).toEqual(new Map());
+  });
+
+  it("geeft elke naam zijn eigen koppeling, ook bij gedeelde producten", async () => {
+    const store = freshStore();
+    await store.putProduct({ webshopId: "wi-2", title: "AH Banaan", salesUnitSize: null, per100g: { kcal: 89 } });
+    await store.putProduct({ webshopId: "wi-3", title: "AH Magere kwark", salesUnitSize: "500 g", per100g: { kcal: 57 } });
+    await store.putMatch("banaan", "wi-2", 0.8);
+    await store.putMatch("rijpe banaan", "wi-2", 0.7);
+    await store.putMatch("kwark", "wi-3", 0.9);
+
+    const matches = await store.productMatchesFor(["banaan", "rijpe banaan", "kwark"]);
+    expect(matches.get("banaan")?.score).toBe(0.8);
+    expect(matches.get("rijpe banaan")?.product.webshopId).toBe("wi-2");
+    expect(matches.get("kwark")?.product.title).toBe("AH Magere kwark");
+  });
+});
+
 describe("applicatielog", () => {
   it("bewaart regels met niveau, herkomst en details, nieuwste eerst", async () => {
     const store = freshStore();

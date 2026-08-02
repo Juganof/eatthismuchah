@@ -1,6 +1,7 @@
 import type { RawScrape } from "../ah/client";
 import type { Nutrients, Product, RawIngredient, Recipe } from "../ah/types";
 import { deriveTags, forbiddenTags } from "../nutrition/diet";
+import type { ProductMatch } from "../nutrition/resolve";
 import { DEFAULT_SLOTS, type MealSlot } from "../nutrition/split";
 import { DEFAULT_PROFILE, sanitiseProfile, type Profile } from "../nutrition/targets";
 
@@ -342,6 +343,48 @@ export class Store {
 
     const out: Record<string, string> = {};
     for (const row of results ?? []) out[row.ingredient_name] = row.webshop_id;
+    return out;
+  }
+
+  /**
+   * De onthouden productkoppelingen mét voedingswaarden voor een reeks
+   * ingredientnamen in één query. Waar `matchMap` alleen de webshop-ids geeft,
+   * levert dit de volledige `ProductMatch` die `resolveRecipe` nodig heeft om
+   * per regel met gemeten waarden te rekenen in plaats van met een
+   * gewichtsverdeling. De planner en de API-aanroepen gebruiken dit in plaats
+   * van per naam apart op te vragen — dat zou tientallen ronden naar D1 kosten.
+   */
+  async productMatchesFor(names: string[]): Promise<Map<string, ProductMatch>> {
+    if (names.length === 0) return new Map();
+    const { results } = await this.db
+      .prepare(
+        `SELECT m.ingredient_name, m.score, p.webshop_id, p.title, p.sales_unit_size, p.per_100g
+         FROM ingredient_matches m
+         JOIN products p ON p.webshop_id = m.webshop_id
+         WHERE m.ingredient_name IN (${names.map(() => "?").join(", ")})`,
+      )
+      .bind(...names)
+      .all<{
+        ingredient_name: string;
+        score: number;
+        webshop_id: string;
+        title: string;
+        sales_unit_size: string | null;
+        per_100g: string;
+      }>();
+
+    const out = new Map<string, ProductMatch>();
+    for (const row of results ?? []) {
+      out.set(row.ingredient_name, {
+        product: {
+          webshopId: row.webshop_id,
+          title: row.title,
+          salesUnitSize: row.sales_unit_size ?? null,
+          per100g: JSON.parse(row.per_100g) as Nutrients,
+        },
+        score: row.score,
+      });
+    }
     return out;
   }
 

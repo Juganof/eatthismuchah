@@ -1,7 +1,7 @@
 import type { AhClient } from "../ah/client";
-import type { Nutrients, ResolvedRecipe } from "../ah/types";
+import type { Nutrients, Recipe, ResolvedRecipe } from "../ah/types";
 import type { SlotCandidate, Store } from "../db/queries";
-import { resolveRecipe } from "../nutrition/resolve";
+import { resolveRecipe, type ProductMatch } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
 import { buildTargets, planRecipe, targetCost, type Plan, type PlanOptions } from "./plan";
@@ -187,13 +187,38 @@ async function planCandidates(
   const macroTargets = buildTargets({ ...targets, kcalMode: options.kcalMode });
   const results: PlanOption[] = [];
 
+  // Eerst alle recepten van deze ronde ophalen en hun ingredientnamen
+  // verzamelen, zodat één query alle onthouden productmatches levert — niet één
+  // lookup per kandidaat per ingredient. De matchMap-achtige lookup is zuiver
+  // databasewerk, dus plannen raakt ah.nl er niet door aan.
+  const recipes = new Map<string, Recipe>();
+  const names = new Set<string>();
   for (const candidate of candidates) {
     const recipe = await store.getRecipe(candidate.id);
     if (!recipe || recipe.ingredients.length === 0) continue;
+    recipes.set(candidate.id, recipe);
+    for (const ingredient of recipe.ingredients) names.add(ingredient.name.toLowerCase());
+  }
+  const allMatches = await store.productMatchesFor([...names]);
+
+  for (const candidate of candidates) {
+    const recipe = recipes.get(candidate.id);
+    if (!recipe) continue;
+
+    // De onthouden matches van deze ronde, gegroepeerd per recept: alleen de
+    // namen die dit recept gebruikt. Met die gemeten productwaarden rekent
+    // `resolveRecipe` per regel (nutrientSource "product") in plaats van het
+    // recepttotaal naar gewicht te verdelen.
+    const matches = new Map<string, ProductMatch>();
+    for (const ingredient of recipe.ingredients) {
+      const name = ingredient.name.toLowerCase();
+      const found = allMatches.get(name);
+      if (found !== undefined) matches.set(name, found);
+    }
 
     // Puur rekenwerk: de voedingswaarde staat bij het recept, dus plannen raakt
     // ah.nl niet aan.
-    const resolved = resolveRecipe(recipe);
+    const resolved = resolveRecipe(recipe, matches);
 
     // Kost van het recept zoals het geschreven staat, vóór herschalen — puur uit
     // het gecachte recepttotaal, dus geen extra netwerk of solve nodig.

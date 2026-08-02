@@ -22,8 +22,8 @@ export { SubrequestBudgetError };
  * zodat de bestaande blokkade-herkenning ze vangt.
  */
 
-const GQL_URL = "https://www.ah.nl/gql";
-const HOME_URL = "https://www.ah.nl/";
+export const GQL_URL = "https://www.ah.nl/gql";
+export const HOME_URL = "https://www.ah.nl/";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,7 +42,7 @@ export interface ProductSuggestion {
   suggestedPackages: number | null;
 }
 
-const NUTRITION_QUERY = `query P($id: Int!) {
+export const NUTRITION_QUERY = `query P($id: Int!) {
   product(id: $id) {
     __typename id title
     tradeItem { __typename gtin nutritions {
@@ -52,11 +52,11 @@ const NUTRITION_QUERY = `query P($id: Int!) {
   }
 }`;
 
-const BUNDLE_QUERY = `query P($id: Int!) {
+export const BUNDLE_QUERY = `query P($id: Int!) {
   product(id: $id) { __typename id title virtualBundleProducts { product { id title } } }
 }`;
 
-const SUGGESTIONS_QUERY = `query recipeProductSuggestions($options: RecipeProductSuggestionV2Input!) {
+export const SUGGESTIONS_QUERY = `query recipeProductSuggestions($options: RecipeProductSuggestionV2Input!) {
   recipeProductSuggestionsV2(options: $options) {
     optional
     ingredient { id name quantityFloat quantityUnit }
