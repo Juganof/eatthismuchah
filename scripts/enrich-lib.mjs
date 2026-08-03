@@ -24,7 +24,8 @@
 // test/gql.test.ts, test/enrich.test.ts en test/gql-nutrition.test.ts. Alleen
 // het ontleden van de suggestie-respons (parseSuggestions) staat hier nog als
 // spiegel van de rijen-parsing in suggestionsForRecipe (src/ah/gql.ts), want
-// dat is daar geen aparte export.
+// dat is daar geen aparte export. De zoekrespons-parser (parseSearchResults)
+// hoort alleen bij deze lokale flow: de app zelf zoekt nooit losse producten.
 
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
@@ -35,8 +36,8 @@ import os from "node:os";
 const { Store } = await import("../src/db/queries.ts");
 const { parseTradeItem } = await import("../src/ah/gql-nutrition.ts");
 const { matchSuggestionsToIngredients } = await import("../src/ingest/enrich.ts");
-const { isNutritionFree } = await import("../src/nutrition/resolve.ts");
-const { BUNDLE_QUERY, GQL_URL, HOME_URL, NUTRITION_QUERY, SUGGESTIONS_QUERY } = await import("../src/ah/gql.ts");
+const { isNutritionFree, tokenize } = await import("../src/nutrition/resolve.ts");
+const { BUNDLE_QUERY, GQL_URL, HOME_URL, NUTRITION_QUERY, SEARCH_QUERY, SUGGESTIONS_QUERY } = await import("../src/ah/gql.ts");
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite");
@@ -355,9 +356,69 @@ function parseSuggestions(body) {
   return out;
 }
 
+/**
+ * De zoekrespons (productSearch { products { id title salesUnitSize } }) naar
+ * dezelfde ProductSuggestion-vorm als parseSuggestions, zodat de rest van de
+ * flow er niet over hoeft te weten welke bron een koppeling leverde.
+ *
+ * Een 200-respons zonder products-lijst is geen resultaat én geen fout —
+ * behalve wanneer de GraphQL-respons expliciete errors bevat: die telt als
+ * fout, zodat een recept niet ten onrechte "klaar" wordt gevinkt terwijl de
+ * zoekroute kapot is.
+ */
+export function parseSearchResults(body) {
+  const search = isRecord(body?.data?.productSearch) ? body.data.productSearch : null;
+  const rows = search ? search["products"] : null;
+  if (!Array.isArray(rows)) {
+    if (Array.isArray(body?.errors) && body.errors.length > 0) {
+      const detail =
+        body.errors.map((e) => (isRecord(e) ? e["message"] : null)).filter(Boolean).join("; ") ||
+        "onbekende fout";
+      throw new Error(`zoekrespons zonder bruikbare data: ${detail}`);
+    }
+    return [];
+  }
+  const out = [];
+  for (const row of rows) {
+    if (!isRecord(row)) continue;
+    out.push({
+      ingredientName: str(row["title"]) ?? "",
+      productId: String(numOf(row["id"]) ?? "") || null,
+      productTitle: str(row["title"]) ?? null,
+      salesUnitSize: str(row["salesUnitSize"]) ?? null,
+      suggestedPackages: null,
+    });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // De verrijkingsflow zelf
 // ---------------------------------------------------------------------------
+
+// Bovengrens op het aantal zoekquery's per recept: elke zoekactie kost een
+// verzoek aan /gql, en een recept met veel losse regels zou anders het hele
+// tempo-budget van een ronde opslurpen. Regels die hierdoor niet aan bod
+// komen, blijven simpelweg open.
+const MAX_ZOEKOPDRACHTEN = 5;
+
+/**
+ * Zoekt één product voor een ingrediëntnaam via de webshop-zoekquery
+ * (SEARCH_QUERY, dezelfde query als de handmatige zoekbalk van de app) en
+ * geeft de eerste hit terug — AH rankt zelf. De naam wordt genormaliseerd
+ * zoals de app dat doet (tokenize uit src/nutrition/resolve.ts): "verse
+ * basilicum" zoekt dus "basilicum". Null als er geen hit is of de naam niets
+ * zoekbaars oplevert. Gooit alleen bij netwerkfouten of een expliciete
+ * foutrespons; de aanroeper telt dat per regel als fout.
+ */
+async function searchFallback(curlCtx, ingredientName) {
+  const query = tokenize(ingredientName).join(" ");
+  if (!query) return null;
+  const body = await curlCtx.gqlPost(SEARCH_QUERY, { input: { query } });
+  const first = parseSearchResults(body)[0];
+  if (!first?.productId) return null;
+  return first;
+}
 
 /**
  * De voedingswaarde per 100 g van één product, met de bundel-fallback:
@@ -436,7 +497,9 @@ export async function needsEnrichment(store, recipe) {
 
 /**
  * Verrijkt één recept: de suggesties ophalen, koppelen aan de regels en
- * producten + koppelingen bewaren. Slaat het recept over (null) zodra alle
+ * producten + koppelingen bewaren. Regels waarvoor AH geen suggestie geeft,
+ * worden via de webshop-zoekquery alsnog gekoppeld (max MAX_ZOEKOPDRACHTEN
+ * zoekacties per recept). Slaat het recept over (null) zodra alle
  * niet-vrije ingrediënten al een koppeling hebben. Gooit nooit: mislukte
  * verzoeken worden per regel gerapporteerd, zoals enrichRecipeWithProducts
  * dat ook doet.
@@ -473,15 +536,31 @@ export async function enrichOneRecipe(store, curlCtx, recipe) {
   let nieuw = 0;
   let cached = 0;
   let fouten = 0;
+  let zoekopdrachten = 0;
 
   for (const [index, ingredient] of recipe.ingredients.entries()) {
-    const suggestion = perIngredient[index];
+    let suggestion = perIngredient[index];
+    let score = 1;
+    // Geen suggestie van AH? Zoek het product zelf via de webshop-zoekquery
+    // en koppel de eerste hit. Vrije ingrediënten (water, zout, peper)
+    // worden nooit gezocht. De koppeling krijgt score 0.8: geen AH's eigen
+    // recept-suggestie maar een zoekresultaat.
+    if (!suggestion?.productId && !isNutritionFree(ingredient.name) && zoekopdrachten < MAX_ZOEKOPDRACHTEN) {
+      zoekopdrachten++;
+      try {
+        suggestion = await searchFallback(curlCtx, ingredient.name);
+        if (suggestion) score = 0.8;
+      } catch (err) {
+        fouten++;
+        console.error(`  zoek '${ingredient.name}' mislukt: ${err.message}`);
+      }
+    }
     if (!suggestion?.productId) continue;
 
     gekoppeld++;
     // De koppeling op naam kost niets en hangt de boodschappenlijst aan;
     // AH's eigen suggestie is per definitie de juiste: score 1.
-    await store.putMatch(ingredient.name, suggestion.productId, 1);
+    await store.putMatch(ingredient.name, suggestion.productId, score);
 
     if (seen.has(suggestion.productId)) continue;
     seen.add(suggestion.productId);

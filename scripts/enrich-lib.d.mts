@@ -5,6 +5,7 @@
 
 import type { Store } from "../src/db/queries";
 import type { Recipe } from "../src/ah/types";
+import type { ProductSuggestion } from "../src/ah/gql";
 
 export type CurlContext = {
   ensureSession: () => Promise<void>;
@@ -35,6 +36,13 @@ export function curlJson(query: string, variables: Record<string, unknown>): Pro
 
 /** De curl-sessie als één object: ensureSession + gqlPost. */
 export function curlContext(): CurlContext;
+
+/**
+ * De zoekrespons (productSearch { products }) naar ProductSuggestion-vorm;
+ * gooit bij een expliciete GraphQL-foutrespons, geeft [] bij een leeg
+ * zoekresultaat of een 200 zonder products-lijst.
+ */
+export function parseSearchResults(body: unknown): ProductSuggestion[];
 
 /**
  * De niet-vrije ingrediënten van een recept die nog geen productkoppeling

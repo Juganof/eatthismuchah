@@ -16,6 +16,9 @@ export { SubrequestBudgetError };
  *   - `product(id) { tradeItem { nutritions } }` — de voedingswaarde per 100 g.
  *     Virtuele bundels (2-packs e.d.) hebben geen tradeItem; hun fysieke
  *     variantproduct staat in `virtualBundleProducts`.
+ *   - `productSearch` ("recipeVagueSuggestionsSearch") — de zoekquery achter
+ *     de zoekbalk: een losse ingrediëntnaam opzoeken wanneer de suggestie-
+ *     query voor een regel geen product voorstelt.
  *
  * Het endpoint is onofficieel en kan zonder aankondiging veranderen. Deze
  * client gooit daarom fouten in hetzelfde formaat als `AhClient` (`-> 403`),
@@ -63,6 +66,12 @@ export const SUGGESTIONS_QUERY = `query recipeProductSuggestions($options: Recip
     productSuggestion { id quantity proposer
       product { id title brand webPath salesUnitSize }
     }
+  }
+}`;
+
+export const SEARCH_QUERY = `query recipeVagueSuggestionsSearch($input: ProductSearchInput!) {
+  productSearch(input: $input) {
+    products { id title brand webPath salesUnitSize }
   }
 }`;
 

@@ -273,7 +273,10 @@ openen naast de dev-server een venster met de watcher
 zijn waarvan nog niet alle niet-vrije ingrediënten (water, zout en peper
 tellen niet mee) een productkoppeling hebben, en verrijkt er per ronde een
 handvol — een recept dat net is gescraped staat dus vanzelf binnen een minuut
-vol met producten en koppelingen, zonder aparte stap. De watcher kan gewoon
+vol met producten en koppelingen, zonder aparte stap. Heeft AH voor een regel
+géén suggestie (dat gebeurt bij veel recepten), dan zoekt de watcher het
+product zelf via de webshop-zoekquery en koppelt de eerste hit — met maximaal
+5 zoekacties per recept. De watcher kan gewoon
 starten vóór de dev-server: ontbreekt de database nog, dan wacht hij en
 probeert het opnieuw.
 

@@ -105,10 +105,34 @@ function fakeCurl(handler: (query: string, variables: Record<string, unknown>) =
   return { ctx, calls };
 }
 
+/**
+ * De suggesties zoals AH ze teruggeeft wanneer hij voor één regel géén
+ * product voorstelt: alleen de kikkererwten hebben een productSuggestion,
+ * de basilicum-regel niet. De fallback-zoekquery moet die tweede regel
+ * alsnog koppelen.
+ */
+const SUGGESTIES_EEN_REGEL = {
+  data: {
+    recipeProductSuggestionsV2: [
+      SUGGESTIES_BODY.data.recipeProductSuggestionsV2[0],
+      {
+        optional: false,
+        ingredient: { id: 1906511, name: "verse basilicum", quantityFloat: 5, quantityUnit: "g" },
+        productSuggestion: null,
+      },
+    ],
+  },
+};
+
 /** Het gebruikelijke antwoordgedrag: suggesties + voeding per product-id. */
-function standaardHandler(options: { geenTradeItem?: Set<number>; bundelVariant?: number; voeding?: (id: number) => unknown } = {}) {
+function standaardHandler(options: { geenTradeItem?: Set<number>; bundelVariant?: number; voeding?: (id: number) => unknown; zoek?: (query: string) => unknown } = {}) {
   return (query: string, variables: Record<string, unknown>): unknown => {
     if (query.includes("recipeProductSuggestionsV2")) return SUGGESTIES_BODY;
+    if (query.includes("productSearch")) {
+      const input = variables["input"] as Record<string, unknown> | undefined;
+      const q = String(input?.["query"] ?? "");
+      return (options.zoek ?? (() => ({ data: { productSearch: { products: [] } } })))(q);
+    }
     if (query.includes("virtualBundleProducts")) {
       if (options.bundelVariant === undefined) {
         return { data: { product: { virtualBundleProducts: [] } } };
@@ -351,5 +375,86 @@ describe("enrichOneRecipe", () => {
 
     expect(line).toEqual({ gekoppeld: 0, nieuw: 0, cached: 0, fouten: 0 });
     expect(await store.matchMap(["biologische kikkererwten"])).toEqual({});
+  });
+
+  it("valt voor regels zonder suggestie terug op de zoekquery en koppelt de eerste hit met score 0.8", async () => {
+    const store = testDb();
+    const { ctx, calls } = fakeCurl((query, variables) => {
+      if (query.includes("recipeProductSuggestionsV2")) return SUGGESTIES_EEN_REGEL;
+      if (query.includes("productSearch")) {
+        return {
+          data: {
+            productSearch: {
+              products: [
+                { id: 611642, title: "AH Basilicum", brand: "AH", webPath: "/producten/product/wi611642", salesUnitSize: "60 g" },
+                { id: 999999, title: "AH Verse basilicum", brand: "AH", webPath: "/producten/product/wi999999", salesUnitSize: "30 g" },
+              ],
+            },
+          },
+        };
+      }
+      return VOEDING(Number(variables["id"]));
+    });
+
+    const line = await enrichOneRecipe(store, ctx, RECEPT);
+
+    expect(line).toEqual({ gekoppeld: 2, nieuw: 2, cached: 0, fouten: 0 });
+    // De suggestie-koppeling heeft score 1, de zoek-koppeling 0.8: het is
+    // geen AH's eigen recept-suggestie maar een zoekresultaat.
+    expect(await store.getMatch("biologische kikkererwten")).toEqual({ webshopId: "168813", score: 1 });
+    expect(await store.getMatch("verse basilicum")).toEqual({ webshopId: "611642", score: 0.8 });
+    // De zoekquery krijgt de genormaliseerde naam: zonder "verse".
+    const zoekCalls = calls.filter((c) => c.query.includes("productSearch"));
+    expect(zoekCalls).toHaveLength(1);
+    expect(zoekCalls[0]!.variables).toEqual({ input: { query: "basilicum" } });
+    // Alleen de eerste hit wordt gekoppeld en zijn voeding opgehaald.
+    expect((await store.getProduct("611642"))?.per100g).toEqual({ kcal: 120, protein: 6.5 });
+    expect(await store.getProduct("999999")).toBeNull();
+  });
+
+  it("laat een regel open zonder fout als de zoekquery geen resultaten geeft", async () => {
+    const store = testDb();
+    const { ctx } = fakeCurl((query, variables) => {
+      if (query.includes("recipeProductSuggestionsV2")) return SUGGESTIES_EEN_REGEL;
+      if (query.includes("productSearch")) {
+        return { data: { productSearch: { products: [] } } };
+      }
+      return VOEDING(Number(variables["id"]));
+    });
+
+    const line = await enrichOneRecipe(store, ctx, RECEPT);
+
+    expect(line).toEqual({ gekoppeld: 1, nieuw: 1, cached: 0, fouten: 0 });
+    expect(await store.matchMap(["verse basilicum"])).toEqual({});
+  });
+
+  it("telt een mislukte zoekquery als fout; de regel wordt niet gekoppeld", async () => {
+    const store = testDb();
+    const { ctx } = fakeCurl((query, variables) => {
+      if (query.includes("recipeProductSuggestionsV2")) return SUGGESTIES_EEN_REGEL;
+      if (query.includes("productSearch")) throw new Error("POST https://www.ah.nl/gql -> 403");
+      return VOEDING(Number(variables["id"]));
+    });
+
+    const line = await enrichOneRecipe(store, ctx, RECEPT);
+
+    // Met een fout blijft het recept op de watcher staan voor een volgende
+    // ronde (de klaar-markering komt alleen bij fouten === 0).
+    expect(line).toEqual({ gekoppeld: 1, nieuw: 1, cached: 0, fouten: 1 });
+    expect(await store.matchMap(["biologische kikkererwten", "verse basilicum"])).toEqual({
+      "biologische kikkererwten": "168813",
+    });
+  });
+
+  it("zoekt nooit voor vrije ingrediënten (zout, water)", async () => {
+    const store = testDb();
+    const { ctx, calls } = fakeCurl(standaardHandler());
+
+    const line = await enrichOneRecipe(store, ctx, RECEPT);
+
+    expect(line).toEqual({ gekoppeld: 2, nieuw: 2, cached: 0, fouten: 0 });
+    // Beide niet-vrije regels hebben een suggestie; zout en water zijn vrij —
+    // er mag dus geen enkele zoekquery uitgaan.
+    expect(calls.filter((c) => c.query.includes("productSearch"))).toHaveLength(0);
   });
 });
