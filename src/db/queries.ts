@@ -268,26 +268,27 @@ export class Store {
   }
 
   /**
-   * Titel en verpakking voor een reeks webshop-ids in één query, net als
-   * `matchMap` voor de ingredientnamen. De boodschappenlijst heeft dit nodig om
-   * "2 × 330 g" te kunnen tonen; per id apart opvragen zou tientallen ronden
-   * naar D1 kosten.
+   * Titel en verpakking voor een reeks webshop-ids, net als `matchMap` voor de
+   * ingredientnamen. De boodschappenlijst heeft dit nodig om "2 × 330 g" te
+   * kunnen tonen; per id apart opvragen zou tientallen ronden naar D1 kosten.
+   * Grote lijsten worden in stukken bevraagd (D1's parameter-limiet).
    */
   async productMap(
     ids: string[],
   ): Promise<Record<string, { title: string; salesUnitSize: string | null }>> {
     if (ids.length === 0) return {};
-    const { results } = await this.db
-      .prepare(
-        `SELECT webshop_id, title, sales_unit_size FROM products
-         WHERE webshop_id IN (${ids.map(() => "?").join(", ")})`,
-      )
-      .bind(...ids)
-      .all<{ webshop_id: string; title: string; sales_unit_size: string | null }>();
-
     const out: Record<string, { title: string; salesUnitSize: string | null }> = {};
-    for (const row of results ?? []) {
-      out[row.webshop_id] = { title: row.title, salesUnitSize: row.sales_unit_size ?? null };
+    for (const chunk of inChunks(ids)) {
+      const { results } = await this.db
+        .prepare(
+          `SELECT webshop_id, title, sales_unit_size FROM products
+           WHERE webshop_id IN (${chunk.map(() => "?").join(", ")})`,
+        )
+        .bind(...chunk)
+        .all<{ webshop_id: string; title: string; sales_unit_size: string | null }>();
+      for (const row of results ?? []) {
+        out[row.webshop_id] = { title: row.title, salesUnitSize: row.sales_unit_size ?? null };
+      }
     }
     return out;
   }
@@ -327,63 +328,68 @@ export class Store {
   }
 
   /**
-   * De onthouden producten voor een reeks ingredientnamen in één query. De
-   * boodschappenlijst heeft dit nodig om productlinks te kunnen zetten; per naam
-   * apart opvragen zou tientallen ronden naar D1 kosten.
+   * De onthouden producten voor een reeks ingredientnamen. De boodschappenlijst
+   * heeft dit nodig om productlinks te kunnen zetten; per naam apart opvragen
+   * zou tientallen ronden naar D1 kosten. Een week boodschappen kan honderden
+   * namen bevatten — meer dan D1 aan parameters in één query toestaat — dus
+   * de lijst wordt in stukken bevraagd.
    */
   async matchMap(names: string[]): Promise<Record<string, string>> {
     if (names.length === 0) return {};
-    const { results } = await this.db
-      .prepare(
-        `SELECT ingredient_name, webshop_id FROM ingredient_matches
-         WHERE webshop_id IS NOT NULL AND ingredient_name IN (${names.map(() => "?").join(", ")})`,
-      )
-      .bind(...names)
-      .all<{ ingredient_name: string; webshop_id: string }>();
-
     const out: Record<string, string> = {};
-    for (const row of results ?? []) out[row.ingredient_name] = row.webshop_id;
+    for (const chunk of inChunks(names)) {
+      const { results } = await this.db
+        .prepare(
+          `SELECT ingredient_name, webshop_id FROM ingredient_matches
+           WHERE webshop_id IS NOT NULL AND ingredient_name IN (${chunk.map(() => "?").join(", ")})`,
+        )
+        .bind(...chunk)
+        .all<{ ingredient_name: string; webshop_id: string }>();
+      for (const row of results ?? []) out[row.ingredient_name] = row.webshop_id;
+    }
     return out;
   }
 
   /**
    * De onthouden productkoppelingen mét voedingswaarden voor een reeks
-   * ingredientnamen in één query. Waar `matchMap` alleen de webshop-ids geeft,
-   * levert dit de volledige `ProductMatch` die `resolveRecipe` nodig heeft om
-   * per regel met gemeten waarden te rekenen in plaats van met een
-   * gewichtsverdeling. De planner en de API-aanroepen gebruiken dit in plaats
-   * van per naam apart op te vragen — dat zou tientallen ronden naar D1 kosten.
+   * ingredientnamen. Waar `matchMap` alleen de webshop-ids geeft, levert dit de
+   * volledige `ProductMatch` die `resolveRecipe` nodig heeft om per regel met
+   * gemeten waarden te rekenen in plaats van met een gewichtsverdeling. De
+   * planner en de API-aanroepen gebruiken dit in plaats van per naam apart op
+   * te vragen — dat zou tientallen ronden naar D1 kosten. Grote lijsten worden
+   * in stukken bevraagd (D1's parameter-limiet, zie `matchMap`).
    */
   async productMatchesFor(names: string[]): Promise<Map<string, ProductMatch>> {
     if (names.length === 0) return new Map();
-    const { results } = await this.db
-      .prepare(
-        `SELECT m.ingredient_name, m.score, p.webshop_id, p.title, p.sales_unit_size, p.per_100g
-         FROM ingredient_matches m
-         JOIN products p ON p.webshop_id = m.webshop_id
-         WHERE m.ingredient_name IN (${names.map(() => "?").join(", ")})`,
-      )
-      .bind(...names)
-      .all<{
-        ingredient_name: string;
-        score: number;
-        webshop_id: string;
-        title: string;
-        sales_unit_size: string | null;
-        per_100g: string;
-      }>();
-
     const out = new Map<string, ProductMatch>();
-    for (const row of results ?? []) {
-      out.set(row.ingredient_name, {
-        product: {
-          webshopId: row.webshop_id,
-          title: row.title,
-          salesUnitSize: row.sales_unit_size ?? null,
-          per100g: JSON.parse(row.per_100g) as Nutrients,
-        },
-        score: row.score,
-      });
+    for (const chunk of inChunks(names)) {
+      const { results } = await this.db
+        .prepare(
+          `SELECT m.ingredient_name, m.score, p.webshop_id, p.title, p.sales_unit_size, p.per_100g
+           FROM ingredient_matches m
+           JOIN products p ON p.webshop_id = m.webshop_id
+           WHERE m.ingredient_name IN (${chunk.map(() => "?").join(", ")})`,
+        )
+        .bind(...chunk)
+        .all<{
+          ingredient_name: string;
+          score: number;
+          webshop_id: string;
+          title: string;
+          sales_unit_size: string | null;
+          per_100g: string;
+        }>();
+      for (const row of results ?? []) {
+        out.set(row.ingredient_name, {
+          product: {
+            webshopId: row.webshop_id,
+            title: row.title,
+            salesUnitSize: row.sales_unit_size ?? null,
+            per100g: JSON.parse(row.per_100g) as Nutrients,
+          },
+          score: row.score,
+        });
+      }
     }
     return out;
   }
@@ -590,12 +596,16 @@ export class Store {
     const doomed = (results ?? []).map((r) => r.id);
     if (doomed.length === 0) return 0;
 
-    const holes = doomed.map(() => "?").join(", ");
-    await this.db
-      .prepare(`DELETE FROM recipe_nutrition WHERE recipe_id IN (${holes})`)
-      .bind(...doomed)
-      .run();
-    await this.db.prepare(`DELETE FROM recipes WHERE id IN (${holes})`).bind(...doomed).run();
+    // Een grote opruiming kan honderden recepten tegelijk wissen; ook hier
+    // geldt D1's parameter-limiet, dus de IN-lijsten worden in stukken gedaan.
+    for (const chunk of inChunks(doomed)) {
+      const holes = chunk.map(() => "?").join(", ");
+      await this.db
+        .prepare(`DELETE FROM recipe_nutrition WHERE recipe_id IN (${holes})`)
+        .bind(...chunk)
+        .run();
+      await this.db.prepare(`DELETE FROM recipes WHERE id IN (${holes})`).bind(...chunk).run();
+    }
     return doomed.length;
   }
 
@@ -1320,6 +1330,22 @@ interface ShortlistRow {
 }
 
 // ----------------------------------------------------------------- helpers
+
+/**
+ * D1 en miniflare staan maximaal 100 gebonden parameters per query toe; meer
+ * levert "too many SQL variables" op. Een IN-lijst die groter is dan die
+ * limiet wordt daarom in stukken bevraagd. 90 blijft ruim onder de grens en
+ * houdt het aantal ronden naar D1 klein.
+ */
+const MAX_IN_PARAMS = 90;
+
+function inChunks<T>(items: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += MAX_IN_PARAMS) {
+    out.push(items.slice(i, i + MAX_IN_PARAMS));
+  }
+  return out;
+}
 
 function toSummary(r: ShortlistRow): RecipeSummary {
   return {

@@ -197,7 +197,7 @@ describe("meal slots", () => {
   it("seeds the default division on first use", async () => {
     const store = freshStore();
     expect(await store.getSlots()).toEqual(DEFAULT_SLOTS);
-    // Zaaien mag maar één keer gebeuren, anders komen ze dubbel terug.
+    // Zaaien mag maar Ã©Ã©n keer gebeuren, anders komen ze dubbel terug.
     expect(await store.getSlots()).toHaveLength(DEFAULT_SLOTS.length);
   });
 
@@ -360,7 +360,7 @@ describe("matchMap", () => {
 });
 
 describe("productMap", () => {
-  it("haalt titel en verpakking van meerdere producten in één query op", async () => {
+  it("haalt titel en verpakking van meerdere producten in Ã©Ã©n query op", async () => {
     const store = freshStore();
     await store.putProduct({ webshopId: "wi-1", title: "Kikkererwten", salesUnitSize: "330 g", per100g: {} });
     await store.putProduct({ webshopId: "wi-2", title: "Melk", salesUnitSize: "1 l", per100g: {} });
@@ -374,7 +374,7 @@ describe("productMap", () => {
 });
 
 describe("productMatchesFor", () => {
-  it("haalt product en score per ingredientnaam in één query op", async () => {
+  it("haalt product en score per ingredientnaam in Ã©Ã©n query op", async () => {
     const store = freshStore();
     await store.putProduct({
       webshopId: "wi-1",
@@ -472,5 +472,88 @@ describe("wipe", () => {
     await store.wipe("alles");
 
     expect((await store.getProfile()).weightKg).toBe(DEFAULT_PROFILE.weightKg);
+  });
+});
+
+describe("grote IN-lijsten (D1-limiet van 100 variabelen)", () => {
+  /**
+   * D1 en miniflare staan maximaal 100 gebonden parameters per query toe.
+   * node:sqlite laat de limiet niet via een PRAGMA verlagen, dus telt de test
+   * het aantal queries: een lijst boven de limiet moet in meerdere queries
+   * worden opgesplitst (chunking). Eén query met 150 parameters is precies de
+   * fout die de gebruiker zag ("too many SQL variables").
+   */
+  async function storeMetTeller(): Promise<{ store: Store; queryCount: () => number }> {
+    const base = createTestDb();
+    let prepares = 0;
+    const wrapped = {
+      ...base,
+      prepare: (sql: string) => {
+        prepares++;
+        return base.prepare(sql);
+      },
+    };
+    db = base;
+    return { store: new Store(wrapped as unknown as TestDb), queryCount: () => prepares };
+  }
+
+  it("matchMap splitst meer dan 100 ingredientnamen in meerdere queries", async () => {
+    const { store, queryCount } = await storeMetTeller();
+    const names = Array.from({ length: 150 }, (_, i) => "ingredient-" + i);
+    for (const name of names.slice(0, 120)) await store.putMatch(name, "wi" + name, 1);
+
+    const before = queryCount();
+    const map = await store.matchMap(names);
+
+    expect(Object.keys(map)).toHaveLength(120);
+    expect(map["ingredient-0"]).toBe("wiingredient-0");
+    expect(map["ingredient-119"]).toBe("wiingredient-119");
+    expect(queryCount() - before).toBeGreaterThan(1);
+  });
+
+  it("productMatchesFor splitst meer dan 100 namen in meerdere queries", async () => {
+    const { store, queryCount } = await storeMetTeller();
+    const names = Array.from({ length: 130 }, (_, i) => "ing-" + i);
+    for (const name of names) {
+      await store.putProduct({ webshopId: "wi" + name, title: name, salesUnitSize: null, per100g: { kcal: 10 } });
+      await store.putMatch(name, "wi" + name, 1);
+    }
+
+    const before = queryCount();
+    const map = await store.productMatchesFor(names);
+
+    expect(map.size).toBe(130);
+    expect(map.get("ing-0")?.product.title).toBe("ing-0");
+    expect(map.get("ing-129")?.product.per100g.kcal).toBe(10);
+    expect(queryCount() - before).toBeGreaterThan(1);
+  });
+
+  it("productMap splitst meer dan 100 webshop-ids in meerdere queries", async () => {
+    const { store, queryCount } = await storeMetTeller();
+    const ids = Array.from({ length: 110 }, (_, i) => "wi" + i);
+    for (const id of ids) {
+      await store.putProduct({ webshopId: id, title: "product " + id, salesUnitSize: "100 g", per100g: {} });
+    }
+
+    const before = queryCount();
+    const map = await store.productMap(ids);
+
+    expect(Object.keys(map)).toHaveLength(110);
+    expect(map["wi109"]?.salesUnitSize).toBe("100 g");
+    expect(queryCount() - before).toBeGreaterThan(1);
+  });
+
+  it("dropIncompleteRecipes splitst meer dan 100 te wissen recepten in meerdere queries", async () => {
+    const { store, queryCount } = await storeMetTeller();
+    for (let i = 0; i < 120; i++) {
+      await store.putRecipe(recipe({ id: "R-R" + i, ingredients: [] }));
+    }
+
+    const before = queryCount();
+    const removed = await store.dropIncompleteRecipes();
+
+    expect(removed).toBe(120);
+    expect(await store.countRecipes()).toBe(0);
+    expect(queryCount() - before).toBeGreaterThan(1);
   });
 });
