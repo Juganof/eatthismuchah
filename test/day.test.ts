@@ -187,6 +187,38 @@ describe("generateDay", () => {
     expect(day.meals).toHaveLength(3);
     expect(day.meals.map((m) => m.slotId)).not.toContain("tussendoortje");
   });
+
+  it("vermenigvuldigt elk plan met de opgegeven porties en telt plan-totalen op", async () => {
+    const store = await storeWithLibrary();
+    const day = await generateDay(store, client, {
+      date: "2026-08-01",
+      slots: DEFAULT_SLOTS,
+      daily,
+      portions: 2,
+    });
+
+    for (const meal of day.meals) {
+      expect(meal.portions).toBe(2);
+      // Doelen blijven per portie; het plan zelf is al × porties.
+      for (const key of ["kcal", "protein", "carbs", "fat", "fiber"] as const) {
+        expect(meal.plan!.totals[key]).toBeCloseTo((meal.plan!.perPortion[key] ?? 0) * 2, 5);
+      }
+    }
+
+    // Het eerste moment heeft een onvervormd doel (500 kcal): ~1000 kcal in het plan.
+    const eerste = day.meals[0]!;
+    expect(Math.abs(eerste.plan!.totals.kcal! - eerste.targets.kcal * 2) / (eerste.targets.kcal * 2)).toBeLessThan(0.15);
+
+    // Dagtotaal is de som van de plan-totalen (al × porties), niet van de
+    // per-portie-waarden — anders zou het dagtotaal op ~2000 blijven staan.
+    const somPlannen = day.meals.reduce((sum, m) => sum + (m.plan?.totals.kcal ?? 0), 0);
+    expect(day.totals.kcal).toBeCloseTo(somPlannen, 0);
+    const somPerPortie = day.meals.reduce((sum, m) => sum + (m.plan?.perPortion.kcal ?? 0), 0);
+    expect(day.totals.kcal! - somPerPortie).toBeGreaterThan(100);
+
+    // De deviatie blijft doel min behaald, ook met porties.
+    expect(day.deviation.kcal).toBeCloseTo(daily.kcal - day.totals.kcal!, 0);
+  });
 });
 
 describe("rerollSlot", () => {

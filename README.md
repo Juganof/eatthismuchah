@@ -315,7 +315,9 @@ Open de worker-URL op je telefoon. Vier tabbladen:
   opties, de beste eerst op afstand tot het momentdoel, en een optie die al dichtbij
   zit staat erbij als "zoals het recept". Eén tik kiest; "Meer opties" haalt een verse
   set. Per maaltijd kun je daarna om een ander recept vragen (vergelijkbare macro's,
-  ander gerecht), favoriet maken of blokkeren. Onderaan het dagtotaal tegenover je
+  ander gerecht), favoriet maken of blokkeren, en het aantal porties instellen
+  ("dit gerecht is voor 2 personen"): de doelen blijven per portie, het plan —
+  ingrediënten én dagtotaal — schaalt mee. Onderaan het dagtotaal tegenover je
   doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
   ingrediënten over alle dagen bij elkaar opgeteld. Zit er één uniek product achter een

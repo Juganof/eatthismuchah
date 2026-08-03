@@ -23,6 +23,8 @@ export interface DayMeal {
   slotId: string;
   slotName: string;
   position: number;
+  /** Voor hoeveel personen dit gerecht wordt klaargemaakt; doelen blijven per portie. */
+  portions: number;
   /** Het doel dat dit moment kreeg, inclusief doorgeschoven rest. */
   targets: DailyTargets;
   /** De zoekhints van dit moment, zodat herrollen ze mee kan sturen. */
@@ -59,9 +61,18 @@ export interface DayOptions {
   candidatesPerSlot?: number;
   /** Hoeveel keuzekaarten elk moment meekrijgt; 1..6, standaard 4. */
   optionsPerMeal?: number;
+  /** Voor hoeveel personen elk plan wordt klaargemaakt (1..10, standaard 1). */
+  portions?: number;
 }
 
 const MACRO_KEYS = ["kcal", "protein", "carbs", "fat", "fiber"] as const;
+
+/** Porties klemmen op 1..10; ongeldige waarden worden gewoon 1. */
+export function clampPortions(value: number | null | undefined): number {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, 10);
+}
 
 /**
  * Hoeveel van de zoekhints van een eetmoment dit recept raakt. Kwark in de
@@ -120,9 +131,10 @@ export function macroDistance(a: Nutrients, b: Nutrients): number {
 function planFor(
   resolved: ResolvedRecipe,
   macroTargets: ReturnType<typeof buildTargets>,
+  portions: number,
   extraBounds?: Pick<PlanOptions, "minScale" | "maxScale">,
 ): Plan {
-  return planRecipe(resolved, macroTargets, { portions: 1, ...extraBounds });
+  return planRecipe(resolved, macroTargets, { portions, ...extraBounds });
 }
 
 export interface PlanOption {
@@ -151,6 +163,8 @@ interface CandidateLoopOptions {
   slotTags?: string[];
   /** Gezet bij herrollen: kies iets met vergelijkbare macro's als dit profiel. */
   similarTo?: Nutrients;
+  /** Voor hoeveel personen het plan wordt klaargemaakt; 1..10, standaard 1. */
+  portions?: number;
   /**
    * Recepten die al dicht bij het doel zitten krijgen hun ingredienten vastgezet
    * op 0.9-1.1x, zodat een "origineel"-optie ook echt nauwelijks herschaald is.
@@ -185,6 +199,7 @@ async function planCandidates(
   }
 
   const macroTargets = buildTargets({ ...targets, kcalMode: options.kcalMode });
+  const portions = clampPortions(options.portions);
   const results: PlanOption[] = [];
 
   // Eerst alle recepten van deze ronde ophalen en hun ingredientnamen
@@ -232,6 +247,7 @@ async function planCandidates(
     const plan = planFor(
       resolved,
       macroTargets,
+      portions,
       options.pinNearFit && near ? { minScale: 0.9, maxScale: 1.1 } : undefined,
     );
 
@@ -312,11 +328,12 @@ function deviationOf(targets: DailyTargets, totals: Nutrients): Nutrients {
   return out;
 }
 
-function sumPerPortion(meals: DayMeal[]): Nutrients {
+/** Som van wat de plannen opleveren: per plan de totalen, die al × porties zijn. */
+function sumPlans(meals: DayMeal[]): Nutrients {
   const out: Nutrients = {};
   for (const key of MACRO_KEYS) {
     let sum = 0;
-    for (const meal of meals) sum += meal.plan?.perPortion[key] ?? 0;
+    for (const meal of meals) sum += meal.plan?.totals[key] ?? 0;
     out[key] = Math.round(sum * 10) / 10;
   }
   return out;
@@ -332,6 +349,7 @@ export function blankDay(date: string, slots: MealSlot[], daily: DailyTargets): 
     slotId: entry.slot.id,
     slotName: entry.slot.name,
     position: entry.slot.position,
+    portions: 1,
     targets: entry.targets,
     slotTags: entry.slot.tags,
     plan: null,
@@ -341,8 +359,8 @@ export function blankDay(date: string, slots: MealSlot[], daily: DailyTargets): 
     date,
     targets: daily,
     meals,
-    totals: sumPerPortion(meals),
-    deviation: deviationOf(daily, sumPerPortion(meals)),
+    totals: sumPlans(meals),
+    deviation: deviationOf(daily, sumPlans(meals)),
   };
 }
 
@@ -353,6 +371,7 @@ export async function generateDay(
 ): Promise<DayPlan> {
   const base = splitTargets(options.daily, options.slots);
   const chosen = [...(options.excludeRecipeIds ?? [])];
+  const portions = clampPortions(options.portions);
   const meals: DayMeal[] = [];
 
   // Wat de al geplande momenten te weinig (positief) of te veel opleverden.
@@ -383,6 +402,7 @@ export async function generateDay(
       kcalMode: options.kcalMode,
       limit: options.candidatesPerSlot ?? 25,
       slotTags: entry.slot.tags,
+      portions,
       pinNearFit: false,
     });
 
@@ -392,8 +412,10 @@ export async function generateDay(
 
     if (plan) {
       chosen.push(plan.recipeId);
+      // Het plan is al × porties: de doelen zijn per portie, dus de rest die dit
+      // moment oplevert is doel minus de totale opbrengst, niet per portie.
       for (const key of MACRO_KEYS) {
-        carry[key] += (targets[key] ?? 0) - (plan.perPortion[key] ?? 0);
+        carry[key] += (targets[key] ?? 0) - (plan.totals[key] ?? 0);
       }
     }
 
@@ -401,6 +423,7 @@ export async function generateDay(
       slotId: entry.slot.id,
       slotName: entry.slot.name,
       position: entry.slot.position,
+      portions,
       targets,
       slotTags: entry.slot.tags,
       plan,
@@ -410,7 +433,7 @@ export async function generateDay(
     });
   }
 
-  const totals = sumPerPortion(meals);
+  const totals = sumPlans(meals);
   return {
     date: options.date,
     targets: options.daily,
@@ -432,6 +455,8 @@ export interface RerollOptions {
   excludedTerms?: string[];
   kcalMode?: "target" | "max";
   candidates?: number;
+  /** Voor hoeveel personen het plan wordt klaargemaakt; 1..10, standaard 1. */
+  portions?: number;
 }
 
 /** Zoekt een ander recept voor één moment, met vergelijkbare macro's. */
@@ -448,6 +473,7 @@ export async function rerollSlot(
     limit: options.candidates ?? 30,
     slotTags: options.slotTags,
     similarTo: options.similarTo,
+    portions: options.portions,
   });
 }
 
@@ -470,6 +496,7 @@ export async function rerollSlotOptions(
     limit: options.candidates ?? 30,
     slotTags: options.slotTags,
     similarTo: options.similarTo,
+    portions: options.portions,
     pinNearFit: true,
   });
   return pickOptions(all, options.count ?? 4);

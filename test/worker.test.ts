@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
+import type { Plan } from "../src/optimize/plan";
 import { createTestDb } from "./helpers/d1";
 
 const db = createTestDb();
@@ -238,5 +239,112 @@ describe("/api/recipe/:id", () => {
     expect(havermout.product).toBeNull();
     expect(havermout.per100g).toBeNull();
     expect(havermout.nutrientSource).toBe("geschat");
+  });
+});
+
+describe("porties per maaltijd", () => {
+  const post = async (path: string, body: unknown) => {
+    const response = await fetchWorker(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  };
+
+  it("schaalt een slot-plan mee met portions en klemt op 1..10", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { FOODS, seedRecipes } = await import("./helpers/seed");
+    await seedRecipes(new Store(db), [
+      {
+        id: "R-R800",
+        title: "Kip met rijst",
+        servings: 2,
+        ingredients: [
+          { name: "kipfilet", grams: 300, per100g: FOODS.kipfilet! },
+          { name: "rijst", grams: 200, per100g: FOODS.rijst! },
+        ],
+      },
+    ]);
+
+    const targets = { kcal: 600, protein: 50, carbs: 70, fat: 20, fiber: 10 };
+    const slot = (portions: number) =>
+      post("/api/day/slot", { targets, portions }) as Promise<{
+        plan: {
+          portions: number;
+          recipeId: string;
+          totals: { kcal: number };
+          perPortion: { kcal: number };
+          ingredients: { name: string; grams: number }[];
+        };
+      }>;
+
+    const een = await slot(1);
+    const twee = await slot(2);
+    const nul = await slot(0);
+    const elf = await slot(11);
+
+    expect(een.plan.portions).toBe(1);
+    expect(twee.plan.portions).toBe(2);
+    // Onzin wordt geklemd: 0 porties is er minimaal 1, 11 is maximaal 10.
+    expect(nul.plan.portions).toBe(1);
+    expect(elf.plan.portions).toBe(10);
+
+    // Zelfde recept (deterministisch): twee porties is twee keer de hoeveelheid.
+    expect(twee.plan.recipeId).toBe(een.plan.recipeId);
+    expect(twee.plan.totals.kcal).toBeCloseTo(een.plan.totals.kcal * 2, 5);
+    // De solver blijft per portie mikken, ongeacht het aantal porties.
+    expect(twee.plan.perPortion.kcal).toBeCloseTo(een.plan.perPortion.kcal, 5);
+    // En elk ingredient verdubbelt mee (welk recept er ook gekozen is). Grams
+    // worden per plan op 0.1 g afgerond, vandaar de ruime marge.
+    expect(twee.plan.ingredients.length).toBeGreaterThan(0);
+    for (let i = 0; i < twee.plan.ingredients.length; i++) {
+      expect(twee.plan.ingredients[i]!.grams).toBeCloseTo(een.plan.ingredients[i]!.grams * 2, 0);
+    }
+  });
+
+  it("telt de verdubbelde grams van een opgeslagen dag met 2 porties op in de boodschappenlijst", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { FOODS, seedRecipes } = await import("./helpers/seed");
+    await seedRecipes(new Store(db), [
+      {
+        id: "R-R801",
+        title: "Zalm met rijst",
+        servings: 1,
+        ingredients: [
+          { name: "zalm", grams: 180, per100g: FOODS.zalm! },
+          { name: "rijst", grams: 90, per100g: FOODS.rijst! },
+        ],
+      },
+    ]);
+
+    const targets = { kcal: 550, protein: 40, carbs: 60, fat: 20, fiber: 6 };
+    const een = (await post("/api/day/slot", { targets })) as { plan: Plan };
+    const twee = (await post("/api/day/slot", { targets, portions: 2 })) as {
+      plan: Plan;
+    };
+
+    const dag = {
+      date: "2026-08-01",
+      targets,
+      totals: twee.plan.totals,
+      meals: [
+        { slotId: "diner", slotName: "Diner", position: 0, targets, slotTags: [], plan: twee.plan },
+      ],
+    };
+    const saved = (await post("/api/day/save", { day: dag })) as {
+      ok: boolean;
+      id: string;
+    };
+    expect(saved.ok).toBe(true);
+
+    const shop = (await (
+      await fetchWorker("/api/shopping?dayId=" + encodeURIComponent(saved.id))
+    ).json()) as { days: number; lines: { name: string; grams: number }[] };
+    expect(shop.days).toBe(1);
+    const zalm = shop.lines.find((l) => l.name === "zalm")!;
+    const zalmEen = een.plan.ingredients.find((i) => i.name === "zalm")!;
+    // Het plan draagt de grams al × porties; de lijst telt alleen op.
+    expect(zalm.grams).toBeCloseTo(zalmEen.grams * 2, 0);
   });
 });

@@ -132,6 +132,10 @@ export const styles = `
   .meal-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .meal-head .slot { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 
+  /* Porties per maaltijd: + en - naast het aantal, als één compacte regel. */
+  .portions { display: flex; align-items: center; gap: 8px; margin: 6px 0 0; }
+  .portions .small { padding: 4px 10px; }
+
   /* Een receptnaam die je kunt aantikken. Ziet eruit als tekst, gedraagt zich
      als een knop, zodat toetsenbord en schermlezer het ook snappen. */
   .linklike {

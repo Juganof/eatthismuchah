@@ -290,8 +290,17 @@ function planCard(meal) {
       + 'bijdrage van die ingredi\\u00ebnten een onderschatting.</p>'
     : "";
 
+  // Porties per maaltijd: de doelen blijven per portie, het plan (grams en
+  // totalen) is al × porties. Wijzigen roept de slot-route opnieuw aan.
+  const portions = meal.portions || p.portions || 1;
+  const portionsStep =
+    '<div class="portions"><button class="secondary small portions-minus" type="button" title="E\\u00e9\\u00e9n portie minder">&#8722;</button>'
+    + '<span class="muted">' + portions + ' portie' + (portions === 1 ? "" : "s") + '</span>'
+    + '<button class="secondary small portions-plus" type="button" title="E\\u00e9\\u00e9n portie meer">&#43;</button></div>';
+
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
     + mealHead(meal)
+    + portionsStep
     + recipeLink(p.recipeId, p.title)
     + macroChips(p.perPortion)
     + rows
@@ -410,6 +419,13 @@ function bindMealButtons() {
 
     card.querySelector(".reroll").onclick = (event) => run(event.target, () => replaceMeal(meal));
 
+    // Porties per maaltijd: + en - roepen de slot-route opnieuw aan met het
+    // nieuwe aantal, zodat het plan (grams en totalen) meeschaalt.
+    const minus = card.querySelector(".portions-minus");
+    if (minus) minus.onclick = (event) => run(event.target, () => setPortions(meal, portionsOf(meal) - 1));
+    const plus = card.querySelector(".portions-plus");
+    if (plus) plus.onclick = (event) => run(event.target, () => setPortions(meal, portionsOf(meal) + 1));
+
     card.querySelector(".fav").onclick = (event) => run(event.target, async () => {
       await postJson("/api/prefs", { recipeId: meal.plan.recipeId, status: "fav" });
       toast("Favoriet: " + meal.plan.title);
@@ -452,7 +468,8 @@ async function moreOptions(meal) {
     similarTo: meal.plan ? meal.plan.perPortion : undefined,
     slotTags: meal.slotTags || [],
     kcalMode: $("dayKcalMode").value,
-    optionCount: 4
+    optionCount: 4,
+    portions: portionsOf(meal)
   });
   showOptions(meal, data.options);
 }
@@ -464,7 +481,8 @@ async function fillMeal(meal) {
     excludeRecipeIds: chosenToday(meal.slotId),
     slotTags: meal.slotTags || [],
     kcalMode: $("dayKcalMode").value,
-    optionCount: 4
+    optionCount: 4,
+    portions: portionsOf(meal)
   });
   showOptions(meal, data.options);
 }
@@ -486,7 +504,8 @@ async function replaceMeal(meal) {
     similarTo: meal.plan.perPortion,
     slotTags: meal.slotTags || [],
     kcalMode: $("dayKcalMode").value,
-    optionCount: 4
+    optionCount: 4,
+    portions: portionsOf(meal)
   });
   showOptions(meal, data.options);
 }
@@ -496,9 +515,38 @@ function recomputeTotals() {
   const totals = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   currentDay.meals.forEach((meal) => {
     if (!meal.plan) return;
-    Object.keys(totals).forEach((key) => { totals[key] += meal.plan.perPortion[key] || 0; });
+    // De plan-totalen zijn al × porties; perPortion zou het dagtotaal laten
+    // krimpen naar "voor 1 persoon".
+    Object.keys(totals).forEach((key) => { totals[key] += meal.plan.totals[key] || 0; });
   });
   currentDay.totals = totals;
+}
+
+/** Het aantal porties dat dit moment nu heeft; staat op de maaltijd of het plan. */
+function portionsOf(meal) {
+  return meal.portions || (meal.plan && meal.plan.portions) || 1;
+}
+
+/**
+ * Nieuw aantal porties voor dit moment. De doelen blijven per portie; het plan
+ * wordt opnieuw opgehaald, zodat grams en totalen meeschalen.
+ */
+async function setPortions(meal, n) {
+  n = Math.min(Math.max(Math.round(n) || 1, 1), 10);
+  if (n === portionsOf(meal)) return;
+  const data = await postJson("/api/day/slot", {
+    targets: meal.targets,
+    excludeRecipeIds: chosenToday(meal.slotId),
+    slotTags: meal.slotTags || [],
+    kcalMode: $("dayKcalMode").value,
+    optionCount: 1,
+    portions: n
+  });
+  meal.plan = data.plan;
+  meal.portions = n;
+  meal.options = null;
+  recomputeTotals();
+  renderDay(currentDay);
 }
 
 $("generateDay").onclick = () => run($("generateDay"), async () => {

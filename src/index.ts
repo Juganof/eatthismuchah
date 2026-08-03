@@ -14,7 +14,7 @@ import {
 } from "./ingest/pipeline";
 import { splitTargets, type MealSlot } from "./nutrition/split";
 import { dailyTargets, sanitiseProfile, bmr, tdee, type DailyTargets } from "./nutrition/targets";
-import { blankDay, generateDay, rerollSlotOptions, type DayPlan } from "./optimize/day";
+import { blankDay, clampPortions, generateDay, rerollSlotOptions, type DayPlan } from "./optimize/day";
 import { buildTargets, planRecipe, rankPlans, type Plan } from "./optimize/plan";
 import { buildShoppingList, type ShoppingInput } from "./plan/shopping";
 import { renderPage } from "./ui/page";
@@ -522,6 +522,7 @@ app.post("/api/day/generate", async (c) => {
     excludeRecipeIds: body.excludeRecipeIds ?? [],
     kcalMode: body.kcalMode,
     candidatesPerSlot: body.candidatesPerSlot,
+    portions: clampPortions(body.portions),
   });
 
   return c.json(day);
@@ -561,6 +562,7 @@ app.post("/api/day/slot", async (c) => {
     kcalMode: body.kcalMode,
     candidates: body.candidates,
     count: optionCountOf(body),
+    portions: clampPortions(body.portions),
   });
 
   if (options.length === 0) {
@@ -591,6 +593,7 @@ app.post("/api/day/reroll", async (c) => {
     kcalMode: body.kcalMode,
     candidates: body.candidates,
     count: optionCountOf(body),
+    portions: clampPortions(body.portions),
   });
 
   if (options.length === 0) {
@@ -763,6 +766,8 @@ interface DayRequest {
   excludeRecipeIds?: string[];
   kcalMode?: "target" | "max";
   candidatesPerSlot?: number;
+  /** Voor hoeveel personen elk plan wordt klaargemaakt; 1..10, standaard 1. */
+  portions?: number;
 }
 
 interface RerollRequest {
@@ -774,6 +779,8 @@ interface RerollRequest {
   candidates?: number;
   /** Hoeveel keuzekaarten terug moeten komen; 1 (het oude gedrag) als niet gezet. */
   optionCount?: number;
+  /** Voor hoeveel personen het plan wordt klaargemaakt; 1..10, standaard 1. */
+  portions?: number;
 }
 
 // ----------------------------------------------------------------- helpers
