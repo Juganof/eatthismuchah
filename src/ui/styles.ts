@@ -68,6 +68,11 @@ export const styles = `
   .row { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
   .row:last-child { border-bottom: 0; }
   .row .amt { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  /* Afgevinkte boodschappenregels: uitgedimd en doorgestreept, in de winkel
+     hoef je er niet meer naar te kijken. Het vinkje zelf blijft aanklikbaar. */
+  .shop-row { align-items: center; }
+  .shop-row.checked { opacity: .5; }
+  .shop-row.checked span, .shop-row.checked a { text-decoration: line-through; }
   .chg { color: var(--accent); font-weight: 600; }
 
   .macros { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Plan, PlannedIngredient } from "../src/optimize/plan";
-import { buildShoppingList, packagesFor, parsePackSize, piecesFor } from "../src/plan/shopping";
+import type { ShoppingLine } from "../src/plan/shopping";
+import {
+  buildShoppingList,
+  packagesFor,
+  parsePackSize,
+  piecesFor,
+  shoppingLinesToText,
+} from "../src/plan/shopping";
 
 const ingredient = (over: Partial<PlannedIngredient> & { name: string }): PlannedIngredient => ({
   grams: 100,
@@ -170,6 +177,60 @@ describe("piecesFor", () => {
   it("geeft null terug zolang er een aantal ontbreekt", () => {
     expect(piecesFor([3, null])).toBeNull();
     expect(piecesFor([])).toBeNull();
+  });
+});
+
+describe("shoppingLinesToText", () => {
+  const line = (over: Partial<ShoppingLine>): ShoppingLine => ({
+    name: "test",
+    grams: 100,
+    productTitle: null,
+    productUrl: null,
+    usedIn: ["Diner"],
+    unmatched: false,
+    packages: null,
+    packagesLabel: null,
+    pieces: null,
+    ...over,
+  });
+
+  it("schrijft één regel per item, met verpakkingen als die bekend zijn", () => {
+    expect(shoppingLinesToText([line({ name: "kikkererwten", packages: 2, packagesLabel: "2 × 330 g" })])).toBe(
+      "kikkererwten — 2 × 330 g",
+    );
+  });
+
+  it("valt zonder pakket terug op grammen", () => {
+    expect(shoppingLinesToText([line({ name: "rijst", grams: 90 })])).toBe("rijst — 90 g");
+  });
+
+  it("geeft losse stuks weer als stuksverpakking, net als in de UI", () => {
+    expect(shoppingLinesToText([line({ name: "banaan", grams: 100, pieces: 5 })])).toBe("banaan — 5 stuks");
+  });
+
+  it("markeert een regel zonder product met '(controleer zelf)'", () => {
+    expect(shoppingLinesToText([line({ name: "kwark", grams: 250, unmatched: true })])).toBe(
+      "kwark — 250 g (controleer zelf)",
+    );
+  });
+
+  it("zet de productlink erbij als die bekend is", () => {
+    expect(
+      shoppingLinesToText([
+        line({ name: "kipfilet", grams: 400, productUrl: "https://www.ah.nl/producten/product/wi123456" }),
+      ]),
+    ).toBe("kipfilet — 400 g (https://www.ah.nl/producten/product/wi123456)");
+  });
+
+  it("geeft een lege lijst als lege tekst terug", () => {
+    expect(shoppingLinesToText([])).toBe("");
+  });
+
+  it("scheidt regels met een nieuwe regel", () => {
+    expect(shoppingLinesToText([
+      line({ name: "kikkererwten", packages: 2, packagesLabel: "2 × 330 g" }),
+      line({ name: "rijst", grams: 90 }),
+    ])).toBe("kikkererwten — 2 × 330 g\nrijst — 90 g");
   });
 });
 

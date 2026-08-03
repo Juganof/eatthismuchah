@@ -132,6 +132,31 @@ function productUrlFor(webshopId: string | null): string | null {
   return webshopId ? `${PRODUCT_PAGE}${webshopId}` : null;
 }
 
+/**
+ * Zet de boodschappenlijst om naar platte tekst: één regel per item, om te
+ * kopieren voor in de winkel of om te delen. "Kikkererwten — 2 × 330 g".
+ *
+ * Per regel dezelfde keuze als de UI maakt: verpakkingen als die bekend zijn,
+ * anders het aantal stuks, anders de grammen. Een regel zonder product krijgt
+ * "(controleer zelf)" erachter; een bekende productlink komt er tussen haakjes
+ * bij. Deze functie blijft vrij van backticks en ${-tekens, want de UI schrijft
+ * de bron ervan in een template-string (zie src/ui/script.ts).
+ */
+export function shoppingLinesToText(lines: ShoppingLine[]): string {
+  return lines
+    .map((line) => {
+      const amt = line.packagesLabel
+        ? line.packagesLabel
+        : line.pieces != null
+          ? Math.round(line.pieces) + " stuks"
+          : Math.round(line.grams) + " g";
+      const flag = line.unmatched ? " (controleer zelf)" : "";
+      const link = line.productUrl ? " (" + line.productUrl + ")" : "";
+      return line.name + " — " + amt + flag + link;
+    })
+    .join("\n");
+}
+
 export interface ShoppingInput {
   /** Naam van de maaltijd, voor "gebruikt in". */
   label: string;

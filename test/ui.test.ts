@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { script } from "../src/ui/script";
-import { adminCard, browseTab, recipeDialog } from "../src/ui/markup";
+import { adminCard, browseTab, recipeDialog, weekTab } from "../src/ui/markup";
 
 /**
  * De clientcode is één grote template-string, dus de compiler kijkt er niet in:
@@ -43,14 +43,27 @@ describe("gegenereerde clientcode", () => {
     expect(script).toContain('querySelector(".slot-max-kcal")');
   });
 
+  it("heeft de boodschappenlijst-extra's: kopieerknop, afvinkvakjes en dagkeuze", () => {
+    // De knop en het dagkiezen zijn statisch in het weektabblad; de
+    // afvinkvakjes worden per rij gegenereerd, dus die moeten in het script
+    // zelf staan, net als de pure tekstomzetter die de kopieerknop gebruikt.
+    const markup = weekTab();
+    for (const id of ["shop-copy", "shopDay"]) {
+      expect(script, `${id} wordt aangesproken`).toContain(`$("${id}")`);
+      expect(markup, `${id} staat in de markup`).toContain(`id="${id}"`);
+    }
+    expect(script).toContain('class="shop-check"');
+    expect(script).toContain("shoppingLinesToText");
+  });
+
   it("spreekt alleen elementen aan die in de markup staan", () => {
-    const markup = adminCard() + browseTab() + recipeDialog();
+    const markup = adminCard() + browseTab() + recipeDialog() + weekTab();
     const ids = [...script.matchAll(/\$\("([a-zA-Z0-9_-]+)"\)/g)].map((m) => m[1]!);
     // Alleen de nieuwe log- en wisknoppen; de rest van de UI zit in andere
     // tabbladen die deze test niet inleest.
     const own = [
       "logCopy", "logRefresh", "logClear", "logLevel", "appLogs",
-      "wipe", "wipeAll", "autoPause",
+      "wipe", "wipeAll", "autoPause", "shop-copy", "shopDay",
     ];
     for (const id of own) {
       expect(ids, `${id} wordt aangesproken`).toContain(id);

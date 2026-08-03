@@ -123,6 +123,13 @@ export function weekTab(): string {
       <button class="secondary small" id="loadWeek">Toon periode</button>
       <button class="secondary small" id="shoppingList">Boodschappenlijst</button>
     </div>
+    <div class="actions">
+      <label for="shopDay">Toon dag</label>
+      <select id="shopDay" class="small">
+        <option value="">Hele week</option>
+      </select>
+      <button class="secondary small" id="shop-copy">Kopieer lijst</button>
+    </div>
   </div>
   <div class="week" id="weekDays"></div>
   <div id="shoppingOut"></div>

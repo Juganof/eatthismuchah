@@ -6,6 +6,8 @@
  * backticks en geen dollar-accolades in de JavaScript hieronder — vandaar dat
  * alles met stringoptelling is geschreven.
  */
+import { shoppingLinesToText } from "../plan/shopping";
+
 export const script = `
 const $ = (id) => document.getElementById(id);
 const g = (n) => (n === undefined || n === null ? "?" : Math.round(n));
@@ -593,6 +595,8 @@ async function loadWeek() {
   try {
     const query = "?from=" + encodeURIComponent($("weekFrom").value) + "&to=" + encodeURIComponent($("weekTo").value);
     const data = await api("/api/days" + query);
+    // Dezelfde dagen voeden de boodschappen-dagkeuze: één optie per dag.
+    fillShopDaySelect(data.days);
     $("weekDays").innerHTML = data.days.length
       ? data.days.map(dayCard).join("")
       : '<p class="muted">Nog geen dagen opgeslagen in deze periode.</p>';
@@ -609,9 +613,42 @@ async function loadWeek() {
 
 $("loadWeek").onclick = () => run($("loadWeek"), loadWeek);
 
-$("shoppingList").onclick = () => run($("shoppingList"), async () => {
-  const query = "?from=" + encodeURIComponent($("weekFrom").value) + "&to=" + encodeURIComponent($("weekTo").value);
+// -------------------------------------------------------- boodschappenlijst
+
+// De platte-tekstversie komt rechtstreeks uit src/plan/shopping.ts: de server
+// vult de bron van die pure functie hier in, zodat er maar één implementatie
+// bestaat (en die door de testsuite gedekt wordt).
+const shoppingLinesToText = ${shoppingLinesToText.toString()};
+
+/** De laatst opgehaalde lijst; de kopieerknop kopieert deze. */
+let shoppingLines = [];
+/** Afgevinkte regels, op naam; alleen deze sessie, herladen begint opnieuw. */
+const checkedShopping = new Set();
+
+/** Kopiëren naar het klembord. navigator.clipboard werkt alleen na een echte
+ * klik op een beveiligde verbinding; anders een verborgen textarea met
+ * execCommand, want de app draait ook via file://. */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    const box = document.createElement("textarea");
+    box.value = text;
+    box.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(box);
+    box.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+    box.remove();
+    return ok;
+  }
+}
+
+/** Toont de lijst voor deze query; de weekknop en de dagkeuze roepen dit aan. */
+async function loadShopping(query) {
   const data = await api("/api/shopping" + query);
+  shoppingLines = data.lines;
   if (!data.lines.length) {
     $("shoppingOut").innerHTML = '<div class="card"><p class="muted">Geen boodschappen: sla eerst een dag op.</p></div>';
     return;
@@ -627,9 +664,66 @@ $("shoppingList").onclick = () => run($("shoppingList"), async () => {
       : line.pieces != null
         ? g(line.pieces) + " stuks"
         : g(line.grams) + " g";
-    return '<div class="row"><span>' + name + flag + '</span><span class="amt">' + escapeHtml(amt) + '</span></div>';
+    // Afvinken draait op de geëscapete naam als sleutel: dataset geeft de
+    // attribuutwaarde letterlijk terug, dus de Set en de checkbox matchen.
+    const key = escapeHtml(line.name);
+    const checked = checkedShopping.has(key) ? " checked" : "";
+    return '<div class="row shop-row' + (checked ? " checked" : "") + '">'
+      + '<label class="shop-checkbox"><input class="shop-check" type="checkbox" data-key="' + key + '"' + checked + '></label>'
+      + '<span>' + name + flag + '</span><span class="amt">' + escapeHtml(amt) + '</span></div>';
   }).join("");
   $("shoppingOut").innerHTML = '<div class="card"><h2>Boodschappen (' + data.days + ' dagen)</h2>' + rows + '</div>';
+}
+
+$("shoppingList").onclick = () => run($("shoppingList"), async () => {
+  // De dagkeuze hoort er al te staan (het weektabblad laadt de dagen), maar
+  // als iemand hier zonder dat aankomt, halen we de dagen eerst op.
+  if ($("shopDay").options.length <= 1) await loadWeek();
+  const query = "?from=" + encodeURIComponent($("weekFrom").value) + "&to=" + encodeURIComponent($("weekTo").value);
+  await loadShopping(query);
+});
+
+/** De dagkeuze bijwerken: één optie per opgeslagen dag in deze periode. */
+function fillShopDaySelect(days) {
+  const current = $("shopDay").value;
+  $("shopDay").innerHTML = '<option value="">Hele week</option>'
+    + days.map((day) =>
+        '<option value="' + escapeHtml(day.id) + '">' + escapeHtml(day.date)
+        + (day.name ? ' &middot; ' + escapeHtml(day.name) : '') + '</option>'
+      ).join("");
+  // Staat de gekozen dag er nog in, blijf die tonen; anders terug naar week.
+  $("shopDay").value = days.some((day) => day.id === current) ? current : "";
+}
+
+$("shopDay").onchange = async () => {
+  try {
+    // De dagkeuze laadt één dag via ?dayId=; "Hele week" herstelt de weekrange.
+    const dayId = $("shopDay").value;
+    const query = dayId
+      ? "?dayId=" + encodeURIComponent(dayId)
+      : "?from=" + encodeURIComponent($("weekFrom").value) + "&to=" + encodeURIComponent($("weekTo").value);
+    await loadShopping(query);
+  } catch (err) {
+    toast(err.message, true);
+  }
+};
+
+// Eén gedelegeerde listener op #shoppingOut, net als bij #browseOut: de rijen
+// worden steeds via innerHTML vervangen, maar de container blijft staan.
+$("shoppingOut").addEventListener("change", (event) => {
+  const box = event.target.closest(".shop-check");
+  if (!box) return;
+  const row = box.closest(".shop-row");
+  if (box.checked) checkedShopping.add(box.dataset.key);
+  else checkedShopping.delete(box.dataset.key);
+  row.classList.toggle("checked", box.checked);
+});
+
+$("shop-copy").onclick = () => run($("shop-copy"), async () => {
+  if (!shoppingLines.length) throw new Error("Genereer eerst de lijst.");
+  const text = shoppingLinesToText(shoppingLines);
+  if (!(await copyText(text))) throw new Error("Kopiëren mocht niet automatisch; probeer de lijst handmatig te selecteren.");
+  toast("Lijst gekopieerd (" + shoppingLines.length + " regels).");
 });
 
 // ------------------------------------------------------- receptvenster
