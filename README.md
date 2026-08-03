@@ -261,21 +261,37 @@ te zetten.
 ### Lokaal verrijken
 
 Omdat het vanuit de worker niet kan, staat er een lokaal Node-script klaar dat
-dezelfde verrijking wél uitvoert: `scripts/enrich-local.mjs` haalt per recept via
-`curl.exe` de product-suggesties en voedingswaarden van `/gql` en schrijft die in de
-lokale D1-database (`.wrangler/state/`). De dev-server mag gewoon blijven draaien —
-het script opent de database ernaast (met een busy-timeout) en gebruikt dezelfde
-`Store`-klasse en parsers als de app.
+dezelfde verrijking wél uitvoert: het haalt per recept via `curl.exe` de
+product-suggesties en voedingswaarden van `/gql` en schrijft die in de lokale
+D1-database (`.wrangler/state/`). De dev-server mag gewoon blijven draaien —
+de scripts openen de database ernaast (met een busy-timeout) en gebruiken
+dezelfde `Store`-klasse en parsers als de app.
+
+**Het gebeurt nu automatisch.** Zowel `start-app.bat` als `start-lokaal.bat`
+openen naast de dev-server een venster met de watcher
+(`scripts/enrich-watch.mjs`). Die controleert elke ~20 seconden of er recepten
+zijn waarvan nog niet alle niet-vrije ingrediënten (water, zout en peper
+tellen niet mee) een productkoppeling hebben, en verrijkt er per ronde een
+handvol — een recept dat net is gescraped staat dus vanzelf binnen een minuut
+vol met producten en koppelingen, zonder aparte stap. De watcher kan gewoon
+starten vóór de dev-server: ontbreekt de database nog, dan wacht hij en
+probeert het opnieuw.
+
+Wil je de watcher los draaien (of herstarten nadat je het venster sloot):
 
 ```bash
-node scripts/enrich-local.mjs
+node scripts/enrich-watch.mjs
 ```
 
-Eisen: `curl.exe` op de PATH, en de lokale database moet bestaan (start minstens één
-keer `wrangler dev` of draai `npm run db:init:local`). Het script houdt zelf ≥ 1 s
-rust tussen verzoeken aan ah.nl (Akamai reageert op tempo), herhaalt een 403/429 één
-keer na een wachttijd, en slaat een recept over waarvan alle ingrediënten al
-gekoppeld zijn. Producten die al in de database staan kosten niets meer.
+Eénmalig álles verrijken kan nog steeds met `node scripts/enrich-local.mjs`;
+`start-lokaal.bat enrich` doet dat ook vóór het opstarten van de app.
+
+Eisen: `curl.exe` op de PATH, en de lokale database moet bestaan (start
+minstens één keer `wrangler dev` of draai `npm run db:init:local`). De
+scripts houden zelf ≥ 1 s rust tussen verzoeken aan ah.nl (Akamai reageert op
+tempo), herhalen een 403/429 één keer na een wachttijd, en slaan een recept
+over waarvan alle niet-vrije ingrediënten al gekoppeld zijn. Producten die al
+in de database staan kosten niets meer.
 
 Zodra de database zo gevuld is, schaalt de app per ingrediënt met de gemeten
 voedingswaarden van het gekoppelde product en krijgt de boodschappenlijst de

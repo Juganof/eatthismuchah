@@ -6,6 +6,9 @@ cd /d "%~dp0"
 rem ---------- start-lokaal.bat: start de app lokaal ----------
 rem Gebruik:  start-lokaal.bat           (alleen de app)
 rem           start-lokaal.bat enrich    (eerst producten verrijken via curl, dan de app)
+rem Naast de dev-server gaat automatisch een venster open met de
+rem productverrijking-watcher (scripts\enrich-watch.mjs): elk nieuw gescraped
+rem recept wordt vanzelf verrijkt.
 
 where npm >nul 2>nul
 if errorlevel 1 (
@@ -29,6 +32,13 @@ if /i "%~1"=="enrich" (
     ) else (
         echo scripts\enrich-local.mjs niet gevonden; verrijking overgeslagen.
     )
+)
+
+if exist scripts\enrich-watch.mjs (
+    echo Productverrijking-watcher starten...
+    start "AH verrijker" cmd /k "node scripts\enrich-watch.mjs"
+) else (
+    echo scripts\enrich-watch.mjs niet gevonden; watcher overgeslagen.
 )
 
 echo Dev-server starten op http://127.0.0.1:8787 ...
