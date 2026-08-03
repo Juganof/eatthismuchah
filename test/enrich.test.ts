@@ -143,7 +143,34 @@ const recipePage = (id: string, ingredients: string[]) =>
   })}</script></html>`;
 
 /** Volledige ronde: zoekpagina + receptpagina's + /gql. */
-function stubFullRound(suggestionsBody: unknown = SUGGESTIONS_BODY) {
+const RONDE_SUGGESTIES = {
+  data: {
+    recipeProductSuggestionsV2: [
+      {
+        optional: false,
+        ingredient: { id: 1, name: "havermout", quantityFloat: 100, quantityUnit: "g" },
+        productSuggestion: {
+          id: 168813,
+          quantity: 1,
+          proposer: "A",
+          product: { id: 168813, title: "AH Havermout", brand: "AH", webPath: "/producten/product/wi168813", salesUnitSize: "500 g" },
+        },
+      },
+      {
+        optional: false,
+        ingredient: { id: 2, name: "kwark", quantityFloat: 200, quantityUnit: "g" },
+        productSuggestion: {
+          id: 168813,
+          quantity: 1,
+          proposer: "A",
+          product: { id: 168813, title: "AH Havermout", brand: "AH", webPath: "/producten/product/wi168813", salesUnitSize: "500 g" },
+        },
+      },
+    ],
+  },
+};
+
+function stubFullRound(suggestionsBody: unknown = RONDE_SUGGESTIES) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -193,10 +220,27 @@ describe("matchSuggestionsToIngredients", () => {
     expect(result[1]!.productId).toBe("611642");
   });
 
-  it("valt terug op de volgorde als de naam nergens op lijkt", () => {
+  it("koppelt niet blind op volgorde zonder gedeelde woorden (voorkomt verschoven koppelingen)", () => {
+    // AH slaat regels soms over (bijv. water), waardoor de suggestielijst
+    // verschoven is. Blind op volgorde koppelen zet dan elk product één plek
+    // te laat neer ("water" kreeg zo de chili-olie van de regel ernaast).
+    // Zonder een gedeeld woord is een volgorde-koppeling een vergissing.
     const shifted = [
       { ...suggestions[1]!, ingredientName: "iets heel anders" },
       { ...suggestions[0]!, ingredientName: "ook niks herkenbaars" },
+    ];
+    const result = matchSuggestionsToIngredients(RECIPE.ingredients, shifted);
+
+    expect(result).toEqual([null, null]);
+  });
+
+  it("valt terug op de volgorde zolang de suggestie een woord gemeen heeft", () => {
+    // Zelfde positie, naam net anders ("AH kikkererwten in blik" vs
+    // "kikkererwten"): de woorden overlappen, dus de volgorde-koppeling is
+    // veilig.
+    const shifted = [
+      { ...suggestions[0]!, ingredientName: "AH kikkererwten in blik" },
+      { ...suggestions[1]!, ingredientName: "verse basilicum 60 g" },
     ];
     const result = matchSuggestionsToIngredients(RECIPE.ingredients, shifted);
 
@@ -299,14 +343,12 @@ describe("de ingest-ronde met verrijken aan", () => {
     const store = new Store(env.DB);
     expect(await store.countRecipes()).toBe(2);
     // Producten en koppelingen uit de /gql-suggesties. De mock-suggesties heten
-    // "biologische kikkererwten"/"verse basilicum" en matchen dus niet op naam
-    // met "havermout"/"kwark" — de code valt terug op volgorde, zoals de
-    // matchSuggestionsToIngredients-tests hierboven vastleggen. Kwark krijgt
-    // daardoor de tweede suggestie (611642), niet de eerste.
+    // "havermout"/"kwark" en matchen op naam, dus beide regels krijgen hun
+    // product (168813) zonder volgorde-fallback.
     expect(await store.getProduct("168813")).not.toBeNull();
     expect(await store.matchMap(["havermout", "kwark"])).toEqual({
       havermout: "168813",
-      kwark: "611642",
+      kwark: "168813",
     });
   });
 

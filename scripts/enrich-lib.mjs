@@ -545,6 +545,11 @@ export async function enrichOneRecipe(store, curlCtx, recipe) {
   let zoekopdrachten = 0;
 
   for (const [index, ingredient] of recipe.ingredients.entries()) {
+    // Vrije ingrediënten (water, zout, peper) krijgen nooit een koppeling:
+    // ze leveren geen voedingswaarde op en een suggestie ernaast is per
+    // definitie een vergissing — ook niet als AH er wél een product voor
+    // suggereert.
+    if (isNutritionFree(ingredient.name)) continue;
     let suggestion = perIngredient[index];
     let score = 1;
     // Geen suggestie van AH? Zoek het product zelf via de webshop-zoekquery

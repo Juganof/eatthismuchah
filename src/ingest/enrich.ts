@@ -3,7 +3,7 @@ import type { Recipe } from "../ah/types";
 import { isBudgetError } from "../ah/client";
 import type { ScrapeEnv } from "./pipeline";
 import { Store } from "../db/queries";
-import { tokenize } from "../nutrition/resolve";
+import { tokenize, isNutritionFree } from "../nutrition/resolve";
 
 /**
  * De tweede helft van een recept binnenhalen: de echte producten.
@@ -45,8 +45,12 @@ export interface EnrichOptions {
 
 /**
  * Koppelt suggesties aan recept-regels. Eerst op genormaliseerde naam (zodat
- * "verse basilicum" en "basilicum" elkaar vinden), en als dat nergens raakt op
- * volgorde — AH geeft de regels gewoonlijk in dezelfde volgorde terug.
+ * "verse basilicum" en "basilicum" elkaar vinden). Pas als dat nergens raakt,
+ * valt het terug op de volgorde — en dan alleen als de suggestie minstens één
+ * woord gemeen heeft met de regel. AH slaat regels namelijk wel eens over
+ * (bijv. water), waardoor de suggestielijst verschoven is; blind op volgorde
+ * koppelen zet dan elk product één plek te laat neer ("water" kreeg zo de
+ * chili-olie van de regel ernaast).
  */
 export function matchSuggestionsToIngredients(
   ingredients: Recipe["ingredients"],
@@ -74,11 +78,21 @@ export function matchSuggestionsToIngredients(
       return;
     }
     if (index < suggestions.length && !used.has(index)) {
-      used.add(index);
-      out[index] = suggestions[index]!;
+      const candidate = suggestions[index]!;
+      if (sharesToken(key, tokenize(candidate.ingredientName).join(" "))) {
+        used.add(index);
+        out[index] = candidate;
+      }
     }
   });
   return out;
+}
+
+/** Of twee genormaliseerde namen minstens één woord gemeen hebben. */
+function sharesToken(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const words = new Set(a.split(" "));
+  return b.split(" ").some((w) => words.has(w));
 }
 
 /**
@@ -119,6 +133,10 @@ export async function enrichRecipeWithProducts(
   const seen = new Set<string>();
 
   for (const [index, ingredient] of recipe.ingredients.entries()) {
+    // Vrije ingrediënten (water, zout, peper) krijgen nooit een koppeling:
+    // ze leveren geen voedingswaarde op en een suggestie ernaast is per
+    // definitie een vergissing.
+    if (isNutritionFree(ingredient.name)) continue;
     const suggestion = perIngredient[index];
     if (!suggestion?.productId) continue;
 
