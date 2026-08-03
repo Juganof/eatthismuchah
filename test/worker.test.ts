@@ -42,6 +42,10 @@ describe("Worker routes", () => {
     ]) {
       expect(html, `${route} wordt niet aangeroepen`).toContain(route);
     }
+    // Het receptvenster toont per ingredient het echte AH-product (link, verpakking,
+    // voedingswaarde per 100 g) en markeert regels zonder product als schatting.
+    expect(html, "label voor geschatte regel ontbreekt").toContain("(geschat)");
+    expect(html, "kcal per 100 g uit het productlabel ontbreekt").toContain(" kcal / 100 g)");
   });
 
   it("reports empty database statistics", async () => {
@@ -182,5 +186,57 @@ describe("/api/recipe/:id", () => {
     expect(body.nutritionSource).toBe("ah");
     // Per portie is de helft van het hele recept.
     expect(body.perPortion.kcal).toBeCloseTo(body.total.kcal / 2, 5);
+  });
+
+  it("koppelt een ingredient aan het echte AH-product met voedingswaarden", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { FOODS, seedRecipes } = await import("./helpers/seed");
+    const store = new Store(db);
+    await seedRecipes(store, [
+      {
+        id: "R-R901",
+        title: "Kwark met havermout",
+        servings: 1,
+        ingredients: [
+          { name: "kwark", grams: 300, per100g: FOODS.kwark! },
+          { name: "havermout", grams: 80, per100g: FOODS.havermout! },
+        ],
+      },
+    ]);
+    // Eén ingredient heeft een onthouden productkoppeling, de ander niet.
+    await store.putProduct({
+      webshopId: "123456",
+      title: "AH Magere kwark",
+      salesUnitSize: "500 g",
+      per100g: FOODS.kwark!,
+    });
+    await store.putMatch("kwark", "123456", 1);
+
+    const body = (await (await fetchWorker("/api/recipe/R-R901")).json()) as {
+      ingredients: {
+        name: string;
+        product: string | null;
+        productUrl: string | null;
+        productSize: string | null;
+        per100g: { kcal: number; protein: number } | null;
+        nutrientSource: string;
+      }[];
+    };
+
+    const kwark = body.ingredients[0]!;
+    expect(kwark.name).toBe("kwark");
+    expect(kwark.product).toBe("AH Magere kwark");
+    expect(kwark.productUrl).toBe("https://www.ah.nl/producten/product/wi123456");
+    expect(kwark.productSize).toBe("500 g");
+    // De voedingswaarden van het productlabel zelf, ongeacht de hoeveelheid.
+    expect(kwark.per100g).toEqual({ kcal: 57, protein: 10, carbs: 4, fat: 0.2, fiber: 0 });
+    expect(kwark.nutrientSource).toBe("product");
+
+    // Zonder match blijft de regel een schatting, zonder productkoppeling.
+    const havermout = body.ingredients[1]!;
+    expect(havermout.productUrl).toBeNull();
+    expect(havermout.product).toBeNull();
+    expect(havermout.per100g).toBeNull();
+    expect(havermout.nutrientSource).toBe("geschat");
   });
 });

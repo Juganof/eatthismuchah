@@ -309,6 +309,9 @@ app.get("/api/recipe/:id", async (c) => {
       product: i.product?.title ?? null,
       productId: i.product?.webshopId ?? null,
       productSize: i.product?.salesUnitSize ?? null,
+      // De voedingswaarden van het productlabel zelf, zodat het receptvenster
+      // per ingredient kan tonen wat er in 100 g van dit product zit.
+      per100g: i.product?.per100g ?? null,
       productUrl: i.product ? `https://www.ah.nl/producten/product/wi${i.product.webshopId}` : null,
       matchScore: Math.round(i.matchScore * 100) / 100,
       nutrientSource: i.nutrientSource,

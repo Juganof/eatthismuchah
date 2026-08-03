@@ -620,11 +620,24 @@ function detailAmount(i) {
 function recipeDetail(data) {
   const r = data.recipe;
   const rows = data.ingredients.map((i) => {
+    const flag = i.nutrientSource === "geschat"
+      ? ' <span class="warnish">(geschat)</span>'
+      : '';
     const kcal = i.nutrients && i.nutrients.kcal !== undefined
       ? g(i.nutrients.kcal) + " kcal"
       : '<span class="warnish">geen voedingswaarde</span>';
-    return '<div class="row"><span>' + escapeHtml(i.name) + '</span>'
-      + '<span class="amt">' + detailAmount(i) + '<br>' + kcal + '</span></div>';
+    // Het echte product erachter: klikbare link naar ah.nl, de verpakking en de
+    // voedingswaarde per 100 g rechtstreeks uit het productlabel.
+    const product = i.productUrl
+      ? '<br><a href="' + i.productUrl + '" target="_blank" rel="noopener">'
+        + escapeHtml(i.product) + '</a>'
+        + (i.productSize ? ' <span class="muted">' + escapeHtml(i.productSize) + '</span>' : '')
+        + (i.per100g && i.per100g.kcal !== undefined
+          ? ' <span class="muted">(' + g(i.per100g.kcal) + ' kcal / 100 g)</span>'
+          : '')
+      : '';
+    return '<div class="row"><span>' + escapeHtml(i.name) + flag + '</span>'
+      + '<span class="amt">' + detailAmount(i) + '<br>' + kcal + product + '</span></div>';
   }).join("");
 
   // Waar de cijfers vandaan komen hoort erbij: het totaal is van AH, de
