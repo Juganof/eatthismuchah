@@ -75,6 +75,17 @@ describe("splitTargets", () => {
     expect(split[0]!.targets.kcal).toBe(200);
   });
 
+  it("clamps a share target of 552 kcal down to the 250 kcal maximum", () => {
+    // Het tussendoortje-voorbeeld: het aandeel komt op 552 kcal uit, het maximum
+    // van 250 wint. Het andere moment houdt zijn onveranderde aandeel.
+    const split = splitTargets({ ...daily, kcal: 1104 }, [
+      slot({ id: "snack", position: 0, kcalShare: 0.5, maxKcal: 250 }),
+      slot({ id: "diner", position: 1, kcalShare: 0.5 }),
+    ]);
+    expect(split[0]!.targets.kcal).toBe(250);
+    expect(split[1]!.targets.kcal).toBe(552);
+  });
+
   it("divides evenly when every share is zero", () => {
     const split = splitTargets(daily, [
       slot({ id: "a", position: 0, kcalShare: 0 }),

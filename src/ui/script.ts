@@ -201,6 +201,8 @@ function slotRow(slot) {
     + '<div><input class="slot-share" type="number" inputmode="decimal" step="0.05" min="0" value="' + slot.kcalShare + '"></div>'
     + '<div><input class="slot-enabled" type="checkbox"' + (slot.enabled ? " checked" : "") + '></div>'
     + '<button class="small del" type="button">verwijder</button>'
+    // Een hard maximum wint van het berekende aandeel; leeg laten is geen limiet.
+    + '<div class="slot-tags-cell"><input class="slot-max-kcal" type="number" inputmode="numeric" min="0" placeholder="max kcal, leeg = geen limiet" value="' + (slot.maxKcal || "") + '"></div>'
     + '<div class="slot-tags-cell"><input class="slot-tags" type="text" placeholder="zoekhints, bijv. kwark, havermout" value="'
     + escapeHtml((slot.tags || []).join(", ")) + '"></div>';
   row.querySelector(".del").onclick = () => row.remove();
@@ -208,16 +210,21 @@ function slotRow(slot) {
 }
 
 function readSlots() {
-  return Array.from($("slotRows").children).map((row, index) => ({
-    id: row.dataset.id || "",
-    name: row.querySelector(".slot-name").value,
-    position: index,
-    kcalShare: parseFloat(row.querySelector(".slot-share").value) || 0,
-    enabled: row.querySelector(".slot-enabled").checked,
-    // De hints sturen waar dit moment naar zoekt: kwark in de ochtend, soep bij
-    // de lunch. Leeg laten mag; dan telt alleen het macrodoel.
-    tags: row.querySelector(".slot-tags").value.split(",").map((t) => t.trim()).filter(Boolean)
-  }));
+  return Array.from($("slotRows").children).map((row, index) => {
+    const maxKcal = parseFloat(row.querySelector(".slot-max-kcal").value);
+    return {
+      id: row.dataset.id || "",
+      name: row.querySelector(".slot-name").value,
+      position: index,
+      kcalShare: parseFloat(row.querySelector(".slot-share").value) || 0,
+      enabled: row.querySelector(".slot-enabled").checked,
+      // Leeg of ongeldig is geen limiet; een hard maximum wint van het aandeel.
+      maxKcal: Number.isFinite(maxKcal) && maxKcal > 0 ? maxKcal : null,
+      // De hints sturen waar dit moment naar zoekt: kwark in de ochtend, soep bij
+      // de lunch. Leeg laten mag; dan telt alleen het macrodoel.
+      tags: row.querySelector(".slot-tags").value.split(",").map((t) => t.trim()).filter(Boolean)
+    };
+  });
 }
 
 function renderSplit(split) {

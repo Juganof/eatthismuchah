@@ -28,6 +28,21 @@ describe("gegenereerde clientcode", () => {
     }
   });
 
+  it("heeft per eetmoment een max-kcal-veld, leeg betekent geen limiet", () => {
+    // slotRow is een functie in de template-string die pas in de browser draait;
+    // het veld moet er dus in de string zelf staan, anders is er niets om in te
+    // vullen.
+    expect(script).toContain("slot-max-kcal");
+    expect(script).toContain("max kcal");
+  });
+
+  it("stuurt maxKcal mee bij het opslaan van de eetmomenten", () => {
+    // De clientcode is niet in Node uitvoerbaar (geen DOM), dus dit is een
+    // statische check op de template-string: readSlots moet het veld uitlezen
+    // dat slotRow neerzet, anders verdwijnt de limiet bij het opslaan.
+    expect(script).toContain('querySelector(".slot-max-kcal")');
+  });
+
   it("spreekt alleen elementen aan die in de markup staan", () => {
     const markup = adminCard() + browseTab() + recipeDialog();
     const ids = [...script.matchAll(/\$\("([a-zA-Z0-9_-]+)"\)/g)].map((m) => m[1]!);

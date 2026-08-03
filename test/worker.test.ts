@@ -348,3 +348,104 @@ describe("porties per maaltijd", () => {
     expect(zalm.grams).toBeCloseTo(zalmEen.grams * 2, 0);
   });
 });
+
+describe("maxKcal per eetmoment", () => {
+  // Zoals de UI hem na de fix verstuurt: een hard maximum op het tussendoortje,
+  // geen limiet op de rest (leeg veld = null).
+  const slots = [
+    { id: "tussendoortje", name: "Tussendoortje", position: 0, kcalShare: 0.1, proteinShare: null, enabled: true, tags: ["snack"], maxKcal: 250 },
+    { id: "ontbijt", name: "Ontbijt", position: 1, kcalShare: 0.25, proteinShare: null, enabled: true, tags: [], maxKcal: null },
+    { id: "lunch", name: "Lunch", position: 2, kcalShare: 0.3, proteinShare: null, enabled: true, tags: [], maxKcal: null },
+    { id: "diner", name: "Diner", position: 3, kcalShare: 0.35, proteinShare: null, enabled: true, tags: [], maxKcal: null },
+  ];
+
+  const putSlots = () =>
+    fetchWorker("/api/slots", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slots }),
+    });
+
+  it("slaat maxKcal op via PUT en geeft het terug via GET", async () => {
+    const put = await putSlots();
+    expect(put.status).toBe(200);
+    const putBody = (await put.json()) as { slots: { id: string; maxKcal: number | null }[] };
+    expect(putBody.slots.find((s) => s.id === "tussendoortje")!.maxKcal).toBe(250);
+    expect(putBody.slots.filter((s) => s.id !== "tussendoortje").every((s) => s.maxKcal === null)).toBe(true);
+
+    const getBody = (await (await fetchWorker("/api/slots")).json()) as {
+      slots: { id: string; maxKcal: number | null }[];
+    };
+    expect(getBody.slots.find((s) => s.id === "tussendoortje")!.maxKcal).toBe(250);
+    expect(getBody.slots.filter((s) => s.id !== "tussendoortje").every((s) => s.maxKcal === null)).toBe(true);
+  });
+
+  it("klemt een moment met maxKcal af in een gegenereerde dag (max 250 kcal)", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { FOODS, seedRecipes } = await import("./helpers/seed");
+    await seedRecipes(new Store(db), [
+      {
+        // Macro's exact evenredig aan het geklemde momentdoel (250 kcal, 20 g
+        // eiwit, 30 g kh, 10 g vet, 4 g vezels): dan kan de solver met schaal 1
+        // alles raken en is de uitkomst deterministisch exact 250.
+        id: "R-R700",
+        title: "Snackmix",
+        servings: 1,
+        ingredients: [
+          { name: "snackmix", grams: 50, per100g: { kcal: 500, protein: 40, carbs: 60, fat: 20, fiber: 8 } },
+        ],
+      },
+      {
+        id: "R-R701",
+        title: "Havermoutpap",
+        servings: 1,
+        ingredients: [{ name: "havermout", grams: 200, per100g: FOODS.havermout! }],
+      },
+      {
+        id: "R-R702",
+        title: "Kip met rijst",
+        servings: 1,
+        ingredients: [
+          { name: "kipfilet", grams: 300, per100g: FOODS.kipfilet! },
+          { name: "rijst", grams: 250, per100g: FOODS.rijst! },
+        ],
+      },
+      {
+        id: "R-R703",
+        title: "Zalm met broccoli",
+        servings: 1,
+        ingredients: [
+          { name: "zalm", grams: 350, per100g: FOODS.zalm! },
+          { name: "broccoli", grams: 250, per100g: FOODS.broccoli! },
+          { name: "olijfolie", grams: 10, per100g: FOODS.olijfolie! },
+        ],
+      },
+    ]);
+
+    // De indeling staat in de database; de dag wordt daarmee gegenereerd, zoals
+    // de UI dat doet: opslaan via PUT, dan pas /api/day/generate.
+    await putSlots();
+
+    const targets = { kcal: 3000, protein: 200, carbs: 300, fat: 100, fiber: 40 };
+    const day = (await (
+      await fetchWorker("/api/day/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targets, date: "2026-08-03" }),
+      })
+    ).json()) as {
+      meals: {
+        slotId: string;
+        targets: { kcal: number };
+        plan: { totals: { kcal: number } } | null;
+      }[];
+    };
+
+    const tussendoortje = day.meals.find((m) => m.slotId === "tussendoortje")!;
+    expect(tussendoortje.plan).not.toBeNull();
+    // Het aandeel zou 300 kcal zijn (10% van 3000); het maximum klemt het af
+    // vóórdat er een recept bij gezocht wordt.
+    expect(tussendoortje.targets.kcal).toBe(250);
+    expect(tussendoortje.plan!.totals.kcal).toBeLessThanOrEqual(250);
+  });
+});
