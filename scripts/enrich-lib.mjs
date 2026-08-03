@@ -63,7 +63,13 @@ const BROWSER_HEADERS = [
 
 // Werkmap voor cookies en tussentijdse body-bestanden; de cookie-jar blijft
 // staan tussen runs, zodat de sessie van een vorige keer hergebruikt wordt.
-const WORK_DIR = join(os.tmpdir(), "ah-enrich-local");
+//
+// De map is per proces (pid), NIET gedeeld: draaien er twee watchers tegelijk
+// (twee start-app.bat-vensters), dan zouden ze elkaar's body-bestanden
+// overschrijven en kreeg het ene recept de GraphQL-query van het andere —
+// en daarmee de product-suggesties van een ander recept. Zo'n kruisbestuiving
+// legde "pistachenoten -> AH Halfvolle melk" vast.
+const WORK_DIR = join(os.tmpdir(), "ah-enrich-local-" + process.pid);
 const COOKIE_JAR = join(WORK_DIR, "cookies.txt");
 const BODY_IN = join(WORK_DIR, "body.json");
 const BODY_OUT = join(WORK_DIR, "body-out.json");
