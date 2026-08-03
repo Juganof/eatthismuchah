@@ -32,7 +32,7 @@ if /i "%~1"=="enrich" (
 )
 
 echo Dev-server starten op http://127.0.0.1:8787 ...
-start "AH Macro Planner (wrangler dev)" cmd /k "npx wrangler dev --port 8787"
+start "AH Macro Planner (wrangler dev)" cmd /k "call ""node_modules\.bin\wrangler.cmd"" dev --port 8787"
 
 echo Wachten tot de server klaar is...
 set /a tries=0
