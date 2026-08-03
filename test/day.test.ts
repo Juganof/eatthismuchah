@@ -393,6 +393,90 @@ describe("generateDay keuzekaarten", () => {
   });
 });
 
+describe("eetmoment van opties en plannen", () => {
+  /**
+   * Drie recepten die op titel en ingredienten volkomen neutraal zijn; alleen
+   * AH's keywords bepalen het eetmoment. Het vierde recept zegt niets en moet
+   * dus ook geen moment krijgen.
+   */
+  async function storeWithMoments(): Promise<Store> {
+    db = createTestDb();
+    const store = new Store(db);
+    const neutraal = { kcal: 300, protein: 40, carbs: 20, fat: 10, fiber: 5 };
+    await seedRecipes(store, [
+      {
+        id: "R-M1",
+        title: "Tofu met paprika",
+        keywords: ["ontbijt"],
+        ingredients: [{ name: "tofu", grams: 100, per100g: neutraal }],
+      },
+      {
+        id: "R-M2",
+        title: "Tofu met paprika",
+        keywords: ["tussendoortje"],
+        ingredients: [{ name: "tofu", grams: 100, per100g: neutraal }],
+      },
+      {
+        id: "R-M3",
+        title: "Tofu met paprika",
+        ingredients: [{ name: "tofu", grams: 100, per100g: neutraal }],
+      },
+    ]);
+    return store;
+  }
+
+  it("hangt het moment uit AH's keywords aan elke optie", async () => {
+    const store = await storeWithMoments();
+    // Het exacte per-portie profiel van de drie gelijke recepten: dan passen ze
+    // allemaal zonder herschalen bij het doel en komen ze gegarandeerd in de
+    // selectie terecht.
+    const targets: DailyTargets = { kcal: 300, protein: 40, carbs: 20, fat: 10, fiber: 5 };
+    const options = await rerollSlotOptions(store, client, {
+      targets,
+      excludeRecipeIds: [],
+      count: 6,
+    });
+
+    const ontbijt = options.find((o) => o.plan.recipeId === "R-M1");
+    expect(ontbijt?.plan.moment).toBe("ontbijt");
+    // AH zegt "tussendoortje"; de app vertaalt dat naar het moment "snack".
+    const snack = options.find((o) => o.plan.recipeId === "R-M2");
+    expect(snack?.plan.moment).toBe("snack");
+    // Zonder keywords en zonder aanwijzingen in titel/ingredienten: geen moment.
+    const onbekend = options.find((o) => o.plan.recipeId === "R-M3");
+    expect(onbekend?.plan.moment).toBeNull();
+  });
+
+  it("het plan dat een slot kiest draagt het moment ook", async () => {
+    const store = await storeWithMoments();
+    const plan = await rerollSlot(store, client, {
+      targets: { kcal: 300, protein: 40, carbs: 20, fat: 10, fiber: 5 },
+      excludeRecipeIds: [],
+    });
+
+    expect(plan).not.toBeNull();
+    expect(["ontbijt", "snack"]).toContain(plan!.moment);
+  });
+
+  it("generateDay geeft elk gekozen plan het afgeleide moment mee", async () => {
+    const store = await storeWithLibrary();
+    const day = await generateDay(store, client, {
+      date: "2026-08-01",
+      slots: DEFAULT_SLOTS,
+      daily,
+    });
+
+    for (const meal of day.meals) {
+      // De recepten dragen momentlabels via titel/ingredienten (kwark/havermout =
+      // ontbijt, rijst = diner); een recept zonder aanwijzingen heeft terecht null.
+      const moment = meal.plan!.moment;
+      expect(moment === null || ["ontbijt", "lunch", "snack", "diner"].includes(moment)).toBe(true);
+      // De eerste keuzekaart is het getoonde plan: hun momenten horen gelijk te zijn.
+      expect(meal.options![0]!.plan.moment).toBe(moment);
+    }
+  });
+});
+
 describe("macroDistance", () => {
   it("is zero for identical profiles and grows with the difference", () => {
     const a = { kcal: 600, protein: 40, carbs: 60, fat: 20, fiber: 8 };

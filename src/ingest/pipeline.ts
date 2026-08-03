@@ -1,7 +1,6 @@
 import { AhClient, isBudgetError } from "../ah/client";
 import type { Recipe } from "../ah/types";
 import { Store } from "../db/queries";
-import { deriveTags } from "../nutrition/diet";
 import { recipeTotal } from "../nutrition/resolve";
 import { enrichRecipeWithProducts } from "./enrich";
 
@@ -40,13 +39,9 @@ export const MOMENT_QUERIES: Record<string, string[]> = {
 
 export const MOMENTS = Object.keys(MOMENT_QUERIES);
 
-/** Het eetmoment dat AH zelf aan een recept hangt, of null als het niets zegt. */
-export function momentOf(recipe: Recipe): string | null {
-  for (const tag of deriveTags(recipe)) {
-    if (tag === "ontbijt" || tag === "lunch" || tag === "snack" || tag === "diner") return tag;
-  }
-  return null;
-}
+// Het eetmoment van een recept is tag-logica en woont daarom in
+// src/nutrition/diet.ts; deze export houdt de oude publieke plek in stand.
+export { momentOf } from "../nutrition/diet";
 
 /** Een client die alles wat hij ophaalt meteen archiveert. */
 export interface ClientOptions {

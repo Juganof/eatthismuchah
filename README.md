@@ -317,11 +317,13 @@ Open de worker-URL op je telefoon. Vier tabbladen:
   eetmoment" en "Genereer hele dag" geven je per moment keuzekaarten: maximaal zes
   opties, de beste eerst op afstand tot het momentdoel, en een optie die al dichtbij
   zit staat erbij als "zoals het recept". Eén tik kiest; "Meer opties" haalt een verse
-  set. Per maaltijd kun je daarna om een ander recept vragen (vergelijkbare macro's,
-  ander gerecht), favoriet maken of blokkeren, en het aantal porties instellen
-  ("dit gerecht is voor 2 personen"): de doelen blijven per portie, het plan —
-  ingrediënten én dagtotaal — schaalt mee. Onderaan het dagtotaal tegenover je
-  doel, en "Dag opslaan".
+  set. Elke kaart toont met een badge welk eetmoment het recept is (ontbijt, lunch,
+  tussendoortje of diner — AH's eigen label), en daaronder de gekoppelde AH-producten
+  met hun kcal per 100 g. Per maaltijd kun je daarna om een ander recept vragen
+  (vergelijkbare macro's, ander gerecht), favoriet maken of blokkeren, en het aantal
+  porties instellen ("dit gerecht is voor 2 personen"): de doelen blijven per portie,
+  het plan — ingrediënten én dagtotaal — schaalt mee. Onderaan het dagtotaal tegenover
+  je doel, en "Dag opslaan".
 - **Week** — de opgeslagen dagen in een periode, en de boodschappenlijst erbij:
   ingrediënten over alle dagen bij elkaar opgeteld. Zit er één uniek product achter een
   regel, dan staat er wát je pakt — verpakkingen als "2 × 330 g" (altijd naar boven

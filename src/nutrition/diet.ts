@@ -131,6 +131,14 @@ export function deriveTags(recipe: Recipe): string[] {
   return [...tags];
 }
 
+/** Het eetmoment dat AH zelf aan een recept hangt, of null als het niets zegt. */
+export function momentOf(recipe: Recipe): string | null {
+  for (const tag of deriveTags(recipe)) {
+    if (tag === "ontbijt" || tag === "lunch" || tag === "snack" || tag === "diner") return tag;
+  }
+  return null;
+}
+
 /** De inhoudslabels die deze dieetkeuzes samen verbieden. */
 export function forbiddenTags(diet: string[]): string[] {
   const out = new Set<string>();

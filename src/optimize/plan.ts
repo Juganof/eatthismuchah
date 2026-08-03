@@ -16,6 +16,11 @@ export interface PlanOptions {
   minScale?: number;
   maxScale?: number;
   shapePenalty?: number;
+  /**
+   * Het eetmoment van dit recept (ontbijt|lunch|snack|diner), zoals de planner
+   * het uit AH's keywords afleidt. Null als het recept geen moment draagt.
+   */
+  moment?: string | null;
 }
 
 export interface PlannedIngredient {
@@ -61,6 +66,11 @@ export interface Plan {
   cost: number;
   /** Share of recipe weight with known nutrition. */
   coverage: number;
+  /**
+   * Het eetmoment van dit recept (ontbijt|lunch|snack|diner), afgeleid uit AH's
+   * keywords. De kaart toont dit als badge; null als het recept niets zegt.
+   */
+  moment: string | null;
 }
 
 /**
@@ -230,6 +240,7 @@ export function planRecipe(
     perPortion,
     cost: result.cost,
     coverage: coverageOfPlan(ingredients),
+    moment: opts.moment ?? null,
   };
 }
 

@@ -37,6 +37,8 @@ const plan = (ingredients: PlannedIngredient[]): Plan => ({
   totals: {},
   cost: 0,
   coverage: 1,
+  // De boodschappenlijst kijkt niet naar het eetmoment; de fixture is neutraal.
+  moment: null,
 });
 
 describe("buildShoppingList", () => {

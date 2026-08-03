@@ -449,3 +449,73 @@ describe("maxKcal per eetmoment", () => {
     expect(tussendoortje.plan!.totals.kcal).toBeLessThanOrEqual(250);
   });
 });
+
+describe("eetmoment in de dag-responsen", () => {
+  const post = async (path: string, body: unknown) => {
+    const response = await fetchWorker(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  };
+
+  it("levert het moment mee in de opties en het plan van /api/day/slot", async () => {
+    const { Store } = await import("../src/db/queries");
+    const { seedRecipes } = await import("./helpers/seed");
+    await seedRecipes(new Store(db), [
+      {
+        id: "R-R850",
+        title: "Tofu met paprika",
+        keywords: ["lunch"],
+        servings: 1,
+        ingredients: [
+          { name: "tofu", grams: 100, per100g: { kcal: 300, protein: 40, carbs: 20, fat: 10, fiber: 5 } },
+        ],
+      },
+    ]);
+
+    const body = (await post("/api/day/slot", {
+      targets: { kcal: 300, protein: 40, carbs: 20, fat: 10, fiber: 5 },
+      optionCount: 4,
+    })) as {
+      plan: { recipeId: string; moment: string | null };
+      options: { plan: { recipeId: string; moment: string | null } }[];
+    };
+
+    // Het recept past exact bij het doel, dus het is de eerste optie én het plan.
+    expect(body.plan.recipeId).toBe("R-R850");
+    expect(body.plan.moment).toBe("lunch");
+    expect(body.options[0]!.plan.moment).toBe("lunch");
+    // Elke optie draagt een geldig moment; een recept zonder label mag null zijn.
+    for (const option of body.options) {
+      expect(
+        option.plan.moment === null ||
+          ["ontbijt", "lunch", "snack", "diner"].includes(option.plan.moment),
+      ).toBe(true);
+    }
+  });
+
+  it("levert het moment mee in elk plan van /api/day/generate", async () => {
+    const day = (await (
+      await fetchWorker("/api/day/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targets: { kcal: 3000, protein: 200, carbs: 300, fat: 100, fiber: 40 },
+          date: "2026-08-04",
+        }),
+      })
+    ).json()) as {
+      meals: { plan: { moment: string | null } | null }[];
+    };
+
+    for (const meal of day.meals) {
+      if (!meal.plan) continue;
+      // De recepten in deze database dragen allemaal een momentlabel; een plan
+      // zonder label (null) zou hier ook legitiem zijn.
+      const moment = meal.plan.moment;
+      expect(moment === null || ["ontbijt", "lunch", "snack", "diner"].includes(moment)).toBe(true);
+    }
+  });
+});

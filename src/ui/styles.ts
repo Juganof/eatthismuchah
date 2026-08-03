@@ -84,6 +84,20 @@ export const styles = `
   .macro.over b { color: var(--warn); }
   .macro.good b { color: var(--ok); }
 
+  /* Het eetmoment van een recept als opvallende badge boven op de kaart. */
+  .moment-badge {
+    display: inline-block; margin: 0 0 6px; padding: 3px 10px;
+    background: var(--accent); color: #fff; border-radius: 999px;
+    font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  }
+
+  /* Compacte productregels onder de kaartinfo: naam + kcal per 100 g. */
+  .products {
+    display: grid; gap: 2px; margin-top: 8px; padding-top: 6px;
+    border-top: 1px solid var(--line);
+  }
+  .products span { color: var(--muted); font-size: .76rem; }
+
   /* Keuzekaarten: elke optie is een <button>, dus dezelfde override als .tab
      hierboven — anders maakt de algemene button-regel er iets vols en blauws van. */
   .options { display: grid; gap: 8px; margin-top: 10px; }

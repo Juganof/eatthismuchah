@@ -1,6 +1,7 @@
 import type { AhClient } from "../ah/client";
 import type { Nutrients, Recipe, ResolvedRecipe } from "../ah/types";
 import type { SlotCandidate, Store } from "../db/queries";
+import { momentOf } from "../nutrition/diet";
 import { resolveRecipe, type ProductMatch } from "../nutrition/resolve";
 import { splitTargets, type MealSlot } from "../nutrition/split";
 import type { DailyTargets } from "../nutrition/targets";
@@ -132,9 +133,10 @@ function planFor(
   resolved: ResolvedRecipe,
   macroTargets: ReturnType<typeof buildTargets>,
   portions: number,
+  moment: string | null,
   extraBounds?: Pick<PlanOptions, "minScale" | "maxScale">,
 ): Plan {
-  return planRecipe(resolved, macroTargets, { portions, ...extraBounds });
+  return planRecipe(resolved, macroTargets, { portions, moment, ...extraBounds });
 }
 
 export interface PlanOption {
@@ -244,10 +246,13 @@ async function planCandidates(
     }
     const near = targetCost(perPortionRaw, macroTargets) <= NEAR_FIT_COST;
 
+    // Het eetmoment hoort bij het recept (AH's eigen keywords) en reist mee
+    // naar de kaart, waar het als badge boven op de optie komt te staan.
     const plan = planFor(
       resolved,
       macroTargets,
       portions,
+      momentOf(recipe),
       options.pinNearFit && near ? { minScale: 0.9, maxScale: 1.1 } : undefined,
     );
 

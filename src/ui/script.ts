@@ -7,6 +7,7 @@
  * alles met stringoptelling is geschreven.
  */
 import { shoppingLinesToText } from "../plan/shopping";
+import { kcalPer100g } from "./card-info";
 
 export const script = `
 const $ = (id) => document.getElementById(id);
@@ -309,10 +310,12 @@ function planCard(meal) {
 
   return '<div class="card" data-slot="' + escapeHtml(meal.slotId) + '">'
     + mealHead(meal)
+    + momentBadge(p.moment)
     + portionsStep
     + recipeLink(p.recipeId, p.title)
     + macroChips(p.perPortion)
     + rows
+    + productList(p)
     + scalingNote
     + '<div class="actions">'
     + '<button class="secondary small reroll" type="button">&#128260; Ander recept</button>'
@@ -331,6 +334,43 @@ function scaleSummary(plan) {
 }
 
 /**
+ * Het eetmoment van dit recept als opvallende badge boven op de kaart. De
+ * server leidt het af uit AH's eigen keywords; "snack" is voor lezers een
+ * "Tussendoortje". Alleen tonen als het moment bekend is.
+ */
+function momentBadge(moment) {
+  if (!moment) return "";
+  const label = moment === "snack" ? "Tussendoortje"
+    : moment.charAt(0).toUpperCase() + moment.slice(1);
+  return '<span class="moment-badge">' + label + '</span>';
+}
+
+/**
+ * Compacte productlijst onder de kaartinfo: per regel het AH-product met zijn
+ * kcal per 100 g, afgeleid uit wat de regel als geheel bijdraagt. Hooguit vijf
+ * regels; de rest wordt samengevat, anders wordt de kaart een boodschappenlijst.
+ * Zonder producten blijft de kaart zoals hij is.
+ */
+function productList(plan) {
+  const lines = [];
+  for (const i of plan.ingredients) {
+    if (!i.productTitle) continue;
+    lines.push([i.productTitle, kcalPer100g(i.grams, i.nutrients.kcal)]);
+  }
+  if (lines.length === 0) return "";
+  const shown = lines.slice(0, 5);
+  const extra = lines.length - shown.length;
+  let html = '<div class="products">';
+  for (const line of shown) {
+    html += '<span>' + escapeHtml(line[0])
+      + (line[1] !== null ? ' &mdash; ' + line[1] + ' kcal/100 g' : '')
+      + '</span>';
+  }
+  if (extra > 0) html += '<span class="muted">+' + extra + ' meer</span>';
+  return html + '</div>';
+}
+
+/**
  * Eén keuzekaart: een tik erop kiest hem meteen, dus dat is een <button>. De
  * knop om het recept eerst te bekijken staat er bewust náást en niet in: een
  * knop in een knop bestaat niet, en per ongeluk kiezen terwijl je alleen wilde
@@ -341,9 +381,11 @@ function optionCard(option, index) {
   const bucketLabel = option.bucket === "origineel" ? "zoals het recept" : "aangepast aan je doel";
   return '<div class="option-wrap">'
     + '<button class="option" type="button" data-index="' + index + '">'
+    + momentBadge(p.moment)
     + '<strong>' + escapeHtml(p.title) + '</strong>'
     + '<div class="macros"><span class="macro">' + bucketLabel + '</span></div>'
     + macroChips(p.perPortion)
+    + productList(p)
     + '<p class="muted" style="margin:4px 0 0">' + escapeHtml(scaleSummary(p)) + '</p>'
     + '</button>'
     + '<div class="actions"><button class="secondary small recipe-open" type="button" data-recipe="'
@@ -619,6 +661,10 @@ $("loadWeek").onclick = () => run($("loadWeek"), loadWeek);
 // vult de bron van die pure functie hier in, zodat er maar één implementatie
 // bestaat (en die door de testsuite gedekt wordt).
 const shoppingLinesToText = ${shoppingLinesToText.toString()};
+
+// De kcal-per-100-g-afleiding voor de productregels op de kaart: zelfde
+// patroon, één implementatie uit src/ui/card-info.ts, gedekt door de tests.
+const kcalPer100g = ${kcalPer100g.toString()};
 
 /** De laatst opgehaalde lijst; de kopieerknop kopieert deze. */
 let shoppingLines = [];

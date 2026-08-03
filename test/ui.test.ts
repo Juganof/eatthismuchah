@@ -70,4 +70,18 @@ describe("gegenereerde clientcode", () => {
       expect(markup, `${id} staat in de markup`).toContain(`id="${id}"`);
     }
   });
+
+  it("toont op de receptkaarten een badge met het eetmoment", () => {
+    // Het moment komt van de server (uit AH's keywords) en wordt als opvallende
+    // badge boven op de kaart getoond; "snack" wordt leesbaar "Tussendoortje".
+    expect(script).toContain("moment-badge");
+    expect(script).toContain("Tussendoortje");
+  });
+
+  it("toont per kaartregel het product met kcal per 100 g", () => {
+    // De afleiding is een pure functie die het script inembedt (net als
+    // shoppingLinesToText); de productregel toont per product de kcal/100 g.
+    expect(script).toContain("kcalPer100g");
+    expect(script).toContain("kcal/100 g");
+  });
 });

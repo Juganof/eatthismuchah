@@ -20,6 +20,8 @@ export interface SeedRecipe {
   id: string;
   title: string;
   servings?: number;
+  /** AH's eigen labels (keywords), zoals de scraper ze naast de titel opslaat. */
+  keywords?: string[];
   ingredients: SeedIngredient[];
 }
 
@@ -46,6 +48,7 @@ export async function seedRecipes(store: Store, recipes: SeedRecipe[]): Promise<
       servings,
       imageUrl: null,
       ingredients: seed.ingredients.map((i) => ({ name: i.name, quantity: i.grams, unit: "g" })),
+      keywords: seed.keywords ?? [],
       nutritionPerServing: perServing,
     };
     await store.putRecipe(recipe);
